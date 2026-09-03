@@ -1,0 +1,844 @@
+import type { ChatRequest } from "../shared/contracts.ts";
+import type { WebSearchResponse } from "../shared/intelligence.ts";
+import { z } from "zod";
+import { getDigitalEmployee } from "../shared/digital-employees.ts";
+import { formatMemoryForPrompt } from "./memory.ts";
+import { getSkillTools, getSkillAbilityDescriptions } from "./skill-registry.ts";
+import { getFastMossAbilityDescription, getFastMossTools } from "./mcp-client.ts";
+import { intelligenceStore } from "./intelligence-store.ts";
+import { agentRegistry } from "./agent-registry.ts";
+
+export type AgentDecision =
+  | { tool: "get_shop_info"; args: Record<string, never> }
+  | { tool: "get_sales_overview"; args: { days?: number } }
+  | { tool: "get_order_summary"; args: { days?: number } }
+  | { tool: "get_gmv_summary"; args: { days?: number } }
+  | { tool: "get_refund_summary"; args: { days?: number } }
+  | { tool: "explain_product_operations"; args: { includeBestSellers?: boolean; days?: number } }
+  | { tool: "list_products"; args: { focus?: string; query?: string } }
+  | { tool: "prepare_inventory_update"; args: { skus?: string[]; quantity?: number } }
+  | { tool: "prepare_price_update"; args: { skus?: string[]; price?: number } }
+  | { tool: "generate_operations_report"; args: { days?: number; focus?: string } }
+  | { tool: "create_readonly_automation"; args: { schedule?: string; task?: string } }
+  | { tool: "run_tiktok_scene_query"; args: { scene?: string; region?: string; days?: number } }
+  | { tool: "analyze_category_track"; args: { category?: string; region?: string; days?: number } }
+  | { tool: "get_workflow_status"; args: { workflowId?: string; workflowType?: "product_publish" | "flash_sale" | "kol_outreach" } }
+  | { tool: "get_kol_bridge_status"; args: Record<string, never> }
+  | { tool: "list_kol_creators"; args: { category?: string; minFollowers?: number; limit?: number } }
+  | { tool: "get_kol_stats"; args: Record<string, never> }
+  | { tool: "start_kol_outreach_workflow"; args: { category?: string; minFollowers?: number; commissionRate: number; message?: string; batchSize: number; totalTarget: number; freeSample: boolean } }
+  | { tool: "start_supplier_publish_workflow"; args: { sourceUrl: string; shopId?: string; publishPrice?: number; currency?: string; packageLength?: number; packageWidth?: number; packageHeight?: number; title?: string; description?: string } }
+  | { tool: "start_flash_sale_workflow"; args: { productId: string; activityTitle: string; startAt: string; endAt: string; priceAmount: string; currency?: string; skuQuantityLimit: number; quantityPerUser: number; skuIds?: string[] } }
+  | { tool: "approve_workflow"; args: { workflowId: string } }
+  | { tool: "retry_workflow"; args: { workflowId: string } }
+  | { tool: "verify_workflow"; args: { workflowId: string } }
+  | { tool: "delegate_to_agent"; args: { targetAgent: string; task: string; context?: string } }
+  | { tool: "respond"; args: { content: string; followUps?: string[] } };
+
+const tools = [
+  {
+    type: "function",
+    function: {
+      name: "get_shop_info",
+      description: "查询当前已连接店铺的名称、站点、币种、时区和授权状态。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_sales_overview",
+      description: "查询综合销售概览；仅在用户同时询问多项经营指标或笼统询问经营表现时使用。",
+      parameters: {
+        type: "object",
+        properties: { days: { type: "integer", minimum: 1, maximum: 90 } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_workflow_status",
+      description: "查询本地业务任务的当前步骤、等待项、错误和结果。用户问任务进度、刚才任务到哪或失败原因时使用。",
+      parameters: {
+        type: "object",
+        properties: {
+          workflowId: { type: "string", description: "任务编号；用户没给时省略，系统返回最近任务。" },
+          workflowType: { type: "string", enum: ["product_publish", "flash_sale", "kol_outreach"] },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_kol_bridge_status",
+      description: "检查 KOL 达人浏览器插件是否已连接，可以用于真实读取达人和发送邀约。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_kol_creators",
+      description: "通过浏览器插件读取真实 TikTok 达人库并按类目或最低粉丝数筛选。",
+      parameters: {
+        type: "object",
+        properties: {
+          category: { type: "string" },
+          minFollowers: { type: "integer", minimum: 0 },
+          limit: { type: "integer", minimum: 1, maximum: 200 },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_kol_stats",
+      description: "读取浏览器插件中的真实达人数量、邀约、成功、待处理和失败统计。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "start_kol_outreach_workflow",
+      description: "创建持久化达人建联任务，先读取并锁定真实达人，再通过任务卡片等待人工审核后分批发送。",
+      parameters: {
+        type: "object",
+        properties: {
+          category: { type: "string" },
+          minFollowers: { type: "integer", minimum: 0 },
+          commissionRate: { type: "number", exclusiveMinimum: 0, maximum: 100 },
+          message: { type: "string" },
+          batchSize: { type: "integer", minimum: 1, maximum: 50 },
+          totalTarget: { type: "integer", minimum: 1, maximum: 500 },
+          freeSample: { type: "boolean" },
+        },
+        required: ["commissionRate", "batchSize", "totalTarget", "freeSample"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "start_supplier_publish_workflow",
+      description: "创建从 1688 采集、妙手编辑到 TikTok 发布的持久化任务。只有用户明确要求上架时使用；任务会先返回审核卡片。",
+      parameters: {
+        type: "object",
+        properties: {
+          sourceUrl: { type: "string" }, shopId: { type: "string" }, publishPrice: { type: "number", exclusiveMinimum: 0 }, currency: { type: "string" },
+          packageLength: { type: "number", exclusiveMinimum: 0 }, packageWidth: { type: "number", exclusiveMinimum: 0 }, packageHeight: { type: "number", exclusiveMinimum: 0 },
+          title: { type: "string", description: "准备保存到 TikTok 的商品标题；没有可靠内容时不要编造。" },
+          description: { type: "string", description: "准备保存到 TikTok 的商品描述；没有可靠内容时不要编造。" },
+        },
+        required: ["sourceUrl"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "start_flash_sale_workflow",
+      description: "创建 TikTok SKU 秒杀任务。只有商品、时间、价格、库存和限购完整时使用；真实创建前必须经过任务卡片审核。",
+      parameters: {
+        type: "object",
+        properties: {
+          productId: { type: "string" }, activityTitle: { type: "string" }, startAt: { type: "string", description: "带时区的 ISO 时间" }, endAt: { type: "string", description: "带时区的 ISO 时间" },
+          priceAmount: { type: "string" }, currency: { type: "string" }, skuQuantityLimit: { type: "integer" }, quantityPerUser: { type: "integer" }, skuIds: { type: "array", items: { type: "string" } },
+        },
+        required: ["productId", "activityTitle", "startAt", "endAt", "priceAmount", "skuQuantityLimit", "quantityPerUser"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "approve_workflow",
+      description: "识别用户希望继续等待确认的任务。真实写入必须引导用户点击任务卡片中的审核按钮，不能通过文本直接批准。",
+      parameters: { type: "object", properties: { workflowId: { type: "string" } }, required: ["workflowId"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "retry_workflow",
+      description: "识别用户希望从失败步骤恢复任务。应展示任务卡片，由用户点击重试按钮，不能通过文本直接执行。",
+      parameters: { type: "object", properties: { workflowId: { type: "string" } }, required: ["workflowId"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "verify_workflow",
+      description: "重新读取外部平台，核验已经提交的商品发布或秒杀活动结果。",
+      parameters: { type: "object", properties: { workflowId: { type: "string" } }, required: ["workflowId"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_order_summary",
+      description: "只查询订单数量、订单变化或某段时间是否有订单。",
+      parameters: {
+        type: "object",
+        properties: { days: { type: "integer", minimum: 1, maximum: 90 } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_gmv_summary",
+      description: "只查询 GMV、销售额、成交额或客单价。",
+      parameters: {
+        type: "object",
+        properties: { days: { type: "integer", minimum: 1, maximum: 90 } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_refund_summary",
+      description: "查询退货退款申请数量或退款金额；如果用户问退款原因，也用这个工具并由系统说明原因明细是否可用。",
+      parameters: {
+        type: "object",
+        properties: { days: { type: "integer", minimum: 1, maximum: 90 } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "explain_product_operations",
+      description: "回答是否支持上架、下架、发布、停售商品等能力；若同一句还问什么好卖，将 includeBestSellers 设为 true。",
+      parameters: {
+        type: "object",
+        properties: {
+          includeBestSellers: { type: "boolean" },
+          days: { type: "integer", minimum: 1, maximum: 90 },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_products",
+      description: "查询商品表现、销量和库存风险。",
+      parameters: {
+        type: "object",
+        properties: {
+          focus: { type: "string", enum: ["top", "low_stock", "slow", "all"] },
+          query: { type: "string", description: "用户明确给出的商品名、商品 ID 或 SKU；没有则省略。" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "prepare_inventory_update",
+      description: "准备库存修改计划。只生成差异预览，绝不直接执行。",
+      parameters: {
+        type: "object",
+        properties: {
+          skus: { type: "array", items: { type: "string" }, maxItems: 50 },
+          quantity: { type: "integer", minimum: 1, maximum: 99999 },
+        },
+        required: ["quantity"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "prepare_price_update",
+      description: "准备商品价格修改计划。只生成差异预览，绝不直接执行。",
+      parameters: {
+        type: "object",
+        properties: {
+          skus: { type: "array", items: { type: "string" }, maxItems: 50 },
+          price: { type: "number", exclusiveMinimum: 0 },
+        },
+        required: ["price"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "generate_operations_report",
+      description: "生成日报、周报或经营复盘。",
+      parameters: {
+        type: "object",
+        properties: {
+          days: { type: "integer", minimum: 1, maximum: 90 },
+          focus: { type: "string" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_readonly_automation",
+      description: "创建只读分析、报告或告警自动任务的草稿。",
+      parameters: {
+        type: "object",
+        properties: { schedule: { type: "string" }, task: { type: "string" } },
+        required: ["task"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "delegate_to_agent",
+      description: "将子任务委派给指定的专业 Agent 执行。仅运营总监 Agent 可用；用于跨领域协作时把具体执行交给专业角色。",
+      parameters: {
+        type: "object",
+        properties: {
+          targetAgent: {
+            type: "string",
+            enum: ["product", "pricing", "sourcing", "collection", "publishing", "kol", "content"],
+            description: "目标 Agent 标识",
+          },
+          task: { type: "string", description: "委派给目标 Agent 的具体任务描述" },
+          context: { type: "string", description: "补充上下文信息（原始需求、约束条件等）" },
+        },
+        required: ["targetAgent", "task"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "respond",
+      description: "仅当其他业务工具都不匹配时，用简洁的纯文本回答，并给出最多 3 个与当前问题直接相关的下一步问题。",
+      parameters: {
+        type: "object",
+        properties: {
+          content: { type: "string", description: "直接回答，使用简短中文段落，不使用 Markdown、星号、井号或横线项目符号。" },
+          followUps: { type: "array", items: { type: "string" }, maxItems: 3, description: "确实有帮助时提供 1 至 3 个具体下一步问题；不需要时返回空数组。" },
+        },
+        required: ["content", "followUps"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+// ─── ReAct 循环相关类型 ──────────────────────────────────────
+
+interface ReactStepResult {
+  decision: AgentDecision;
+  observation: string;
+}
+
+export type ToolExecutorFn = (decision: AgentDecision) => Promise<string>;
+
+// ─── 底层 LLM 调用（内部复用） ────────────────────────────────
+
+type ChatMessage = Record<string, unknown>;
+
+interface LlmCallOptions {
+  messages: ChatMessage[];
+  systemPrompt: string;
+  toolDefs?: unknown[];
+  toolChoice?: string;
+  model?: string;
+  maxTokens?: number;
+  // 流式模式：逐 token 回调，用于最终回答的打字机效果
+  stream?: boolean;
+  onToken?: (delta: string) => void;
+  // 强制模型以 JSON 对象返回（OpenAI response_format）
+  responseFormat?: "json";
+}
+
+export function fastModel(): string | undefined {
+  return process.env.LLM_FAST_MODEL?.trim() || process.env.LLM_MODEL?.trim();
+}
+
+function needsDeliberateReasoning(text: string): boolean {
+  return /(?:分析|诊断|复盘|报告|比较|对比|判断|建议|策略|方案|原因|风险|利润|决策|优先级|预测|为什么|如何|怎么提升)/i.test(text);
+}
+
+export async function callLlmRaw(options: LlmCallOptions): Promise<{
+  content?: string;
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
+  toolCallId?: string;
+  assistantMessage?: ChatMessage;
+  allToolCalls?: Array<{ name: string; args: Record<string, unknown>; callId: string }>;
+}> {
+  const baseUrl = (process.env.LLM_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
+  const allMessages: ChatMessage[] = [
+    { role: "system", content: options.systemPrompt },
+    ...options.messages,
+  ];
+
+  const body: Record<string, unknown> = {
+    model: options.model ?? process.env.LLM_MODEL,
+    temperature: 0.1,
+    messages: allMessages,
+  };
+  if (options.maxTokens) body.max_tokens = options.maxTokens;
+  if (options.toolDefs) body.tools = options.toolDefs;
+  if (options.toolChoice) body.tool_choice = options.toolChoice;
+  if (options.stream) body.stream = true;
+  if (options.responseFormat === "json") body.response_format = { type: "json_object" };
+
+  // 503/429 重试：最多 3 次，指数退避
+  const maxRetries = 3;
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    if (attempt > 0) {
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${process.env.LLM_API_KEY}`,
+        "content-type": "application/json",
+        ...(options.stream ? { accept: "text/event-stream" } : {}),
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(45_000),
+    });
+
+    if (response.ok) {
+      // 成功：处理响应（流式或非流式）
+      if (options.stream && response.body) {
+        let content = "";
+        const toolCallBuffers: Array<{ id: string; name: string; args: string }> = [];
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const data = line.slice(6).trim();
+            if (data === "[DONE]") continue;
+            let chunk: { choices?: Array<{ delta?: { content?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> } }> };
+            try { chunk = JSON.parse(data); } catch { continue; }
+            const delta = chunk.choices?.[0]?.delta;
+            if (!delta) continue;
+            if (delta.content) {
+              content += delta.content;
+              options.onToken?.(delta.content);
+            }
+            if (delta.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                if (!toolCallBuffers[tc.index]) toolCallBuffers[tc.index] = { id: tc.id ?? "", name: tc.function?.name ?? "", args: "" };
+                if (tc.id) toolCallBuffers[tc.index].id = tc.id;
+                if (tc.function?.name) toolCallBuffers[tc.index].name = tc.function.name;
+                if (tc.function?.arguments) toolCallBuffers[tc.index].args += tc.function.arguments;
+              }
+            }
+          }
+        }
+
+        const calls = toolCallBuffers.filter((c) => c.id || c.name);
+        if (calls.length > 0) {
+          const parsed = calls.map((call) => {
+            let args: Record<string, unknown> = {};
+            try { args = JSON.parse(call.args) as Record<string, unknown>; } catch { /* ignore */ }
+            return { name: call.name, args, callId: call.id };
+          });
+          const assistantMessage: ChatMessage = {
+            role: "assistant",
+            content: content || null,
+            tool_calls: calls.map((call) => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.args } })),
+          };
+          return {
+            content: content || undefined,
+            toolName: parsed[0].name,
+            toolArgs: parsed[0].args,
+            toolCallId: parsed[0].callId,
+            assistantMessage,
+            allToolCalls: parsed,
+          };
+        }
+
+        return { content: content || undefined };
+      }
+
+      // 非流式模式
+      const payload = (await response.json()) as {
+        choices?: Array<{
+          message?: {
+            role?: string;
+            content?: string;
+            tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
+          };
+        }>;
+      };
+
+      const msg = payload.choices?.[0]?.message;
+      const calls = msg?.tool_calls ?? [];
+
+      if (calls.length > 0) {
+        const parsed = calls.map((call) => {
+          let args: Record<string, unknown> = {};
+          try { args = JSON.parse(call.function.arguments) as Record<string, unknown>; } catch { /* ignore */ }
+          return { name: call.function.name, args, callId: call.id };
+        });
+        const assistantMessage: ChatMessage = {
+          role: "assistant",
+          content: msg?.content ?? null,
+          tool_calls: calls.map((call) => ({ id: call.id, type: "function", function: { name: call.function.name, arguments: call.function.arguments } })),
+        };
+        return {
+          content: msg?.content,
+          toolName: parsed[0].name,
+          toolArgs: parsed[0].args,
+          toolCallId: parsed[0].callId,
+          assistantMessage,
+          allToolCalls: parsed,
+        };
+      }
+
+      return { content: msg?.content };
+    }
+
+    // 失败：检查是否可重试
+    const errorText = await response.text().catch(() => "");
+    lastError = new Error(`LLM request failed (${response.status}): ${errorText.slice(0, 200)}`);
+    if (response.status !== 503 && response.status !== 429 && response.status !== 502) {
+      throw lastError; // 非瞬时错误，直接抛出
+    }
+  }
+
+  throw lastError!;
+}
+
+export async function generateContentText(input: {
+  prompt: string;
+  kind: "title" | "listing" | "script";
+  language?: string;
+  sku?: string;
+}): Promise<string> {
+  if (!hasLlmConfiguration()) throw new Error("文字大模型尚未连接，请先在 .env 配置现有 LLM。");
+  const kindLabel = input.kind === "title" ? "TikTok Shop 商品标题" : input.kind === "listing" ? "商品卖点与 Listing" : "带货短视频脚本";
+  const intelligenceContext = intelligenceStore.buildPromptContext(input.prompt, "content");
+  const result = await callLlmRaw({
+    messages: [{ role: "user", content: input.prompt }],
+    systemPrompt: `你是跨境电商内容创作专家。请生成${kindLabel}，目标语言为${input.language || "泰语"}。${input.sku ? `关联 SKU：${input.sku}。` : ""}内容要真实、清晰、可直接使用，不要编造没有提供的产品参数。只输出成品内容。${intelligenceContext}`,
+    maxTokens: 2_200,
+  });
+  const content = result.content?.trim();
+  if (!content) throw new Error("文字模型没有返回内容。");
+  return content;
+}
+
+export async function summarizeWebResearch(question: string, research: WebSearchResponse): Promise<string> {
+  if (!hasLlmConfiguration()) throw new Error("文字大模型尚未连接。");
+  const evidence = research.results.slice(0, 6).map((result, index) => [
+    `[来源${index + 1}] ${result.title}`,
+    `网址：${result.url}`,
+    `站点：${result.source}${result.publishedAt ? `，日期：${result.publishedAt}` : ""}`,
+    `摘要：${result.snippet.slice(0, 520)}`,
+  ].join("\n")).join("\n\n");
+  const result = await callLlmRaw({
+    messages: [{ role: "user", content: `用户问题：${question}\n\n联网检索结果：\n${evidence}` }],
+    systemPrompt: `你是跨境电商研究助手。只能使用给定的检索结果回答，不得编造费率、日期或政策。优先采信平台官方或一手来源；第三方内容只能作参考。先给结论，再简要区分“可核实事实”“分析判断”和“待确认信息”。最后列出实际使用的来源标题和完整网址。总长度控制在 600 个中文字以内，不要使用 Markdown 链接。`,
+    model: fastModel(),
+    maxTokens: 700,
+  });
+  const content = result.content?.trim();
+  if (!content) throw new Error("模型没有返回联网分析。");
+  return content;
+}
+
+// ─── 单步意图路由（原有功能，增加记忆支持） ────────────────────
+
+export function hasLlmConfiguration(): boolean {
+  return Boolean(process.env.LLM_API_KEY && process.env.LLM_MODEL && process.env.DEMO_MODE !== "true");
+}
+
+function agentRolePrompt(request: ChatRequest): string {
+  const context = request.context ?? "general";
+  const employee = getDigitalEmployee(context);
+  const capabilityPrompt = agentRegistry.getCapabilityPrompt(context);
+  return `\n当前数字员工身份：${employee.name}。主要职责：${employee.description} 优先处理本职责内的任务；遇到跨领域目标时可以调用共享工具和持久化业务流程协同完成，不要让用户手工在多个 Agent 之间搬运信息。${capabilityPrompt}`;
+}
+
+export async function decideWithLlm(request: ChatRequest, memoryContext?: string): Promise<AgentDecision> {
+  const memory = memoryContext ?? "";
+  const skillAbility = await getSkillAbilityDescriptions();
+  const fastmossAbility = await getFastMossAbilityDescription();
+  const skillTools = await getSkillTools();
+  const fastmossTools = await getFastMossTools();
+  // 按 Agent 能力过滤工具集：非运营总监只看到自己有权使用的工具
+  const context = request.context ?? "general";
+  const allTools = [...tools, ...skillTools, ...fastmossTools];
+  const filteredTools = agentRegistry.filterToolsForAgent(context, allTools as Array<{ function: { name: string } }>);
+  const result = await callLlmRaw({
+    messages: [
+      ...(request.history ?? []).slice(-8).map((m) => ({ role: m.role, content: m.content })),
+      { role: "user", content: request.message },
+    ],
+    // 稳定前缀优先：ROUTER_SYSTEM_PROMPT + skillAbility + fastmossAbility 大多数请求不变，
+    // 放前面可命中 LLM 供应商 prefix cache，减少 prefill 延迟；随请求变化的 role/memory 放后面
+    systemPrompt: ROUTER_SYSTEM_PROMPT + skillAbility + fastmossAbility + agentRolePrompt(request) + memory,
+    toolDefs: filteredTools,
+    toolChoice: "required",
+    model: fastModel(),
+    maxTokens: 360,
+  });
+
+  if (result.toolName) {
+    return { tool: result.toolName as AgentDecision["tool"], args: result.toolArgs ?? {} } as AgentDecision;
+  }
+  return { tool: "respond", args: { content: result.content ?? "请告诉我想查询的数据或要执行的店铺操作。", followUps: [] } };
+}
+
+// ─── ReAct 多步推理循环 ──────────────────────────────────────
+
+const AGENT_SYSTEM_PROMPT = `你是 TikTok Shop 的智能运营 Agent。你可以连续调用多个工具来获取数据，然后综合所有数据给出有价值的回答。
+
+工作流程：
+1. 分析用户的真实意图（是要查数据、要建议、还是要操作？）— 必须先明确，不能用工具来猜
+2. 逐步调用工具获取所需数据
+3. 根据所有步骤获取的数据，综合思考，用 respond 工具给出针对用户问题的完整回答
+
+关键规则（强制，违反即失败）：
+- respond 的 content 必须直接回答用户的问题，绝对禁止占位套话（如"我已读取数据"、"任务完成"、"请查看上方结果"、"如表格所示"等毫无信息量的句子）
+- 如果用户要建议，必须基于数据给出具体的、可操作的建议（至少 2 条具体动作）
+- 如果用户要分析，必须给出有深度的分析结论（趋势、问题、机会各至少 1 点），而不是罗列数字
+- 如果用户问市场/选品，必须给出：竞争格局（头部集中/分散）+ 热门方向/品类关键词 + TOP3 样本 + 具体建议，4 要素缺 1 补 1
+- 【类目匹配·最高优先】如果用户明确问某个类目/品类/赛道（如"家纺布艺在泰国市场"、"美妆怎么样"）：
+  - ① 读取榜单后先检查前 10 名里有没有该类目商品（通过标题/类目名关键词判断）
+  - ② 如果命中不到 25%，绝对不能把其他类目的数据（香水、iPhone、服装等）硬套成该类目的竞争分析
+  - ③ 必须在回答开头明确说明："当前官方 Bestsellers 返回的是全品类热销榜，XX 类命中不足 25%，不会拿无关数据误导你"，然后给出两条针对性建议：(a) 如何拿到该类目真正的榜单（类目树+类目ID+搜索接口），(b) 现有样本不足时的替代切入方案
+  - ④ 标题写着"serum/parfum/iPhone/vivo/handbag/shirt"等明显不是用户问的类目时，绝对不能放进该类目的 TOP3 样本里
+- 如果只有一张表格或纯列表数据，禁止只说"已展示"或"如上"；必须总结表格里最重要的 3 条结论，并给出下一步建议
+- 回答使用简洁的中文段落，不使用 Markdown 格式；但可以用"①②③"或"第一/第二"组织要点
+- 基于真实数据回答，不编造数字；当数据缺失时明确说明"数据未提供，无法判断"
+- 用户询问最新政策、市场趋势、新闻、竞品或其他可能变化的公开信息时，如果 web_search 工具可用必须先搜索
+- 使用联网结果时要区分"来源事实"和"你的判断"，并在回答结尾保留实际引用的来源标题、日期和完整网址
+- 业务任务必须通过 workflow 工具创建和恢复，不要把多步写操作拆成无法恢复的临时调用
+- 查询和分析可以直接运行；任何真实写入都必须先返回可核对的审核卡片，由用户点击按钮后执行
+- 不存在分析/执行模式切换，不得要求用户切换模式，也不得通过聊天文本绕过审核按钮直接批准或重试写任务
+- 缺少价格、时间、库存、店铺或商品编号时，必须询问用户，不能猜测
+- 可以在同一步同时调用多个互不依赖的只读查询工具（如同时查销售和库存），减少往返；写操作仍必须单独调用
+- 当收集到足够信息后，必须使用 respond 工具给出最终回答，不要只停留在查数据阶段
+- 最终回答最低标准：长度不少于 80 个中文字；如果生成了更短的回答，视为回答不完整，需要补充分析和建议
+- 如果你是运营总监 Agent，遇到需要专业领域执行的任务（如定价计算、达人筛选、上架发布），可以使用 delegate_to_agent 工具把子任务委派给对应的专业 Agent，然后基于委派结果给出综合回答`;
+
+export async function reactLoop(
+  request: ChatRequest,
+  toolExecutor: ToolExecutorFn,
+  memoryContext?: string,
+  maxSteps = 5,
+  onStep?: (decision: AgentDecision, observation: string, index: number) => void,
+  onToken?: (delta: string) => void,
+): Promise<{ finalDecision: AgentDecision; steps: ReactStepResult[] }> {
+  const memory = memoryContext ?? "";
+  const messages: ChatMessage[] = [
+    ...(request.history ?? []).slice(-8).map((m) => ({ role: m.role, content: m.content })),
+    { role: "user", content: request.message },
+  ];
+
+  // 动态加载已启用 Skill 的 tools，按 Agent 能力过滤
+  const skillTools = await getSkillTools();
+  const fastmossTools = await getFastMossTools();
+  const context = request.context ?? "general";
+  const allTools = [...tools, ...skillTools, ...fastmossTools];
+  const filteredTools = agentRegistry.filterToolsForAgent(context, allTools as Array<{ function: { name: string } }>);
+  const skillAbility = await getSkillAbilityDescriptions();
+  const fastmossAbility = await getFastMossAbilityDescription();
+
+  const steps: ReactStepResult[] = [];
+  const reasoningModel = needsDeliberateReasoning(request.message) ? undefined : fastModel();
+
+  for (let step = 0; step < maxSteps; step++) {
+    const result = await callLlmRaw({
+      messages,
+      // 稳定前缀优先，命中 prefix cache；role/memory 放后面
+      systemPrompt: AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + agentRolePrompt(request) + memory,
+      toolDefs: filteredTools,
+      toolChoice: "required",
+      model: reasoningModel ?? (step === 0 ? fastModel() : undefined),
+      maxTokens: step === 0 ? 360 : 900,
+    });
+
+    if (!result.toolName || !result.toolCallId) {
+      const decision: AgentDecision = {
+        tool: "respond",
+        args: { content: result.content ?? "任务完成。", followUps: [] },
+      };
+      steps.push({ decision, observation: "" });
+      return { finalDecision: decision, steps };
+    }
+
+    const decision = { tool: result.toolName as AgentDecision["tool"], args: result.toolArgs ?? {} } as AgentDecision;
+
+    if (decision.tool === "respond") {
+      steps.push({ decision, observation: "" });
+      return { finalDecision: decision, steps };
+    }
+
+    // 并行执行：LLM 可能在一步返回多个互不依赖的只读工具调用
+    const allCalls = result.allToolCalls ?? [{ name: result.toolName!, args: result.toolArgs ?? {}, callId: result.toolCallId! }];
+    if (result.assistantMessage) {
+      messages.push(result.assistantMessage);
+    }
+
+    const observations = await Promise.all(allCalls.map(async (call) => {
+      const callDecision = { tool: call.name as AgentDecision["tool"], args: call.args } as AgentDecision;
+      let observation: string;
+      try {
+        observation = await toolExecutor(callDecision);
+      } catch (error) {
+        observation = `工具执行出错：${error instanceof Error ? error.message : "未知错误"}。请告知用户并建议替代方案。`;
+      }
+      steps.push({ decision: callDecision, observation });
+      onStep?.(callDecision, observation, steps.length - 1);
+      messages.push({
+        role: "tool",
+        tool_call_id: call.callId,
+        content: `工具 ${call.name} 的执行结果：\n${observation}`,
+      });
+      return observation;
+    }));
+
+    // 单工具时保持 decision 指向该工具；多工具时 decision 指向第一个（用于后续渲染）
+    void observations;
+  }
+
+  // 超过最大步数，强制要求 LLM 总结
+  messages.push({
+    role: "user",
+    content: "你已经完成了所有必要的查询步骤。现在请使用 respond 工具，根据已获取的所有数据给出最终回答。",
+  });
+
+  const finalResult = await callLlmRaw({
+    messages,
+    systemPrompt: AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + memory,
+    toolDefs: filteredTools,
+    toolChoice: "required",
+    model: reasoningModel,
+    maxTokens: 900,
+    // 最终回答走流式：逐 token 推送给前端，实现打字机效果
+    stream: Boolean(onToken),
+    onToken,
+  });
+
+  const finalDecision: AgentDecision = finalResult.toolName && finalResult.toolName !== "respond"
+    ? { tool: "respond", args: { content: finalResult.content ?? "已完成多步分析，请查看上方结果。", followUps: [] } }
+    : { tool: "respond", args: { content: finalResult.content ?? "已完成分析。", followUps: [] } };
+
+  steps.push({ decision: finalDecision, observation: "" });
+  return { finalDecision, steps };
+}
+
+// ─── 记忆提取 ──────────────────────────────────────────────────
+
+export interface ExtractedMemories {
+  userPreferences: string[];
+  shopInsights: string[];
+  operationSummary?: string;
+}
+
+const extractedMemoriesSchema = z.object({
+  userPreferences: z.array(z.string().trim().min(1).max(500)).default([]),
+  shopInsights: z.array(z.string().trim().min(1).max(1_000)).default([]),
+  operationSummary: z.string().trim().max(1_000).optional(),
+});
+
+export async function extractMemories(messages: Array<{ role: string; content: string }>): Promise<ExtractedMemories> {
+  try {
+    const result = await callLlmRaw({
+      messages: [
+        {
+          role: "user",
+          content: `分析以下对话，提取值得长期记住的信息。
+
+规则：
+- userPreferences：用户表达的偏好（如"我更关注退款"、"我经常查库存"）
+- shopInsights：关于店铺运营的可复用观察（如"周末订单多"、"某SKU滞销"）
+- operationSummary：如果执行了操作，用一句话总结（如"将SKU-A库存补至500"）
+- 没有值得记住的信息时，返回空数组
+- 不要记住临时查询细节，只记有长期价值的信息
+- 数组中的每一项必须直接是字符串，不能返回对象
+
+请以 JSON 格式返回：{"userPreferences":[],"shopInsights":[],"operationSummary":""}`,
+        },
+        ...messages.slice(-10),
+      ],
+      systemPrompt: "你是记忆提取器。只提取有长期价值的信息，忽略临时查询。返回纯 JSON。",
+    });
+
+    const text = (result.content ?? "").replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    if (!text) return { userPreferences: [], shopInsights: [] };
+
+    const parsed = extractedMemoriesSchema.safeParse(JSON.parse(text));
+    if (!parsed.success) return { userPreferences: [], shopInsights: [] };
+    return {
+      userPreferences: parsed.data.userPreferences,
+      shopInsights: parsed.data.shopInsights,
+      operationSummary: parsed.data.operationSummary || undefined,
+    };
+  } catch {
+    return { userPreferences: [], shopInsights: [] };
+  }
+}
+
+// ─── 反思 ──────────────────────────────────────────────────────
+
+interface ReflectionResult {
+  meetsExpectation: boolean;
+  risks: string[];
+  suggestion: string;
+}
+
+export async function reflectOnResult(
+  operationDescription: string,
+  beforeData: string,
+  afterData: string,
+): Promise<ReflectionResult> {
+  try {
+    const result = await callLlmRaw({
+      messages: [
+        {
+          role: "user",
+          content: `请评估以下店铺操作的结果。
+
+操作描述：${operationDescription}
+操作前数据：${beforeData}
+操作后数据：${afterData}
+
+请评估：
+1. 操作是否达到了预期效果？
+2. 是否存在潜在风险？
+3. 有什么后续建议？
+
+以 JSON 返回：{"meetsExpectation":true/false,"risks":["风险1"],"suggestion":"建议"}`,
+        },
+      ],
+      systemPrompt: "你是运营反思助手。客观评估操作效果，指出风险，给出建议。返回纯 JSON。",
+    });
+
+    const text = (result.content ?? "").replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    if (!text) return { meetsExpectation: true, risks: [], suggestion: "" };
+
+    return JSON.parse(text) as ReflectionResult;
+  } catch {
+    return { meetsExpectation: true, risks: [], suggestion: "" };
+  }
+}
+
+const ROUTER_SYSTEM_PROMPT =
+  "你是 TikTok Shop 运营助手的意图路由器。必须选择最具体的一个工具：店铺名称或站点用 get_shop_info；只问订单用 get_order_summary；只问 GMV、销售额或客单价用 get_gmv_summary；退货、退款或退款原因用 get_refund_summary；同时问多项经营指标或笼统问经营表现才用 get_sales_overview；询问能否上架、下架、发布或停售商品用 explain_product_operations，同句还问什么好卖时设置 includeBestSellers=true；商品数量、商品列表、指定 SKU 库存、好卖、畅销、热销或滞销用 list_products，并把明确的 SKU 或商品关键词放进 query；报告用 generate_operations_report；没有匹配业务工具时调用 respond。所有写操作只能调用 prepare 工具，不能声称已经执行。respond 的 content 只写简洁业务中文，不使用 Markdown、星号、井号、横线列表或表格；先直接回答，再给必要说明。followUps 只提供与当前回答直接相关且系统能够处理的问题，最多 3 条，不为凑数量而生成。调用 respond 的 content 必须真正回答用户的问题，禁止输出占位套话（例如“我已读取数据”、“任务完成”、“请查看上方结果”等）；若有查询数据，必须基于数据给出结论、洞察或建议，而不是复述过程。";

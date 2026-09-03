@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1110" height="230" viewBox="0 0 1110 230" role="img" aria-labelledby="title desc">
+  <title id="title">CyberFleet</title>
+  <desc id="desc">CyberFleet brand logo</desc>
+  <defs>
+    <linearGradient id="facet-top" x1="0" y1="55" x2="110" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4f5f6"/>
+      <stop offset="0.48" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d9dcdf"/>
+    </linearGradient>
+    <linearGradient id="facet-side" x1="118" y1="118" x2="212" y2="154" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f9f9f9"/>
+      <stop offset="0.52" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d4d7da"/>
+    </linearGradient>
+    <linearGradient id="facet-bottom" x1="0" y1="141" x2="107" y2="206" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f7f8f8"/>
+      <stop offset="0.56" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d9dcdf"/>
+    </linearGradient>
+    <mask id="symbol-cutout" maskUnits="userSpaceOnUse" x="0" y="0" width="211" height="212">
+      <rect x="0" y="0" width="211" height="212" fill="#ffffff"/>
+      <polygon points="107,108 107,188 44,156" fill="#000000"/>
+    </mask>
+  </defs>
+  <g>
+    <g fill-rule="evenodd" mask="url(#symbol-cutout)">
+      <polygon points="0,55 107,0 107,108" fill="url(#facet-top)"/>
+      <polygon points="107,108 211,56 211,159 107,212" fill="url(#facet-side)"/>
+      <polygon points="0,133 107,188 107,212 0,157" fill="url(#facet-bottom)"/>
+    </g>
+    <text x="272" y="166" fill="#ffffff" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="169" font-weight="300" letter-spacing="6">CyberFleet</text>
+  </g>
+</svg>

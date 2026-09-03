@@ -1,0 +1,110 @@
+import type { DashboardSnapshot } from "../shared/contracts.ts";
+
+export const dashboard: DashboardSnapshot = {
+  dataSource: "demo",
+  store: {
+    id: "luma-us",
+    name: "Luma Living US",
+    region: "美国",
+    currency: "USD",
+    timezone: "UTC-7",
+    connected: true,
+  },
+  metrics: [
+    { label: "支付 GMV", value: "$60,832", delta: "+12.7%", trend: "up", helper: "较前 7 天" },
+    { label: "订单数", value: "1,247", delta: "+8.3%", trend: "up", helper: "较前 7 天" },
+    { label: "客单价", value: "$48.78", delta: "+4.1%", trend: "up", helper: "较前 7 天" },
+    { label: "退款率", value: "3.1%", delta: "+0.6%", trend: "down", helper: "较前 7 天" },
+  ],
+  salesSeries: [
+    { date: "7/21", sales: 6820, previous: 7020, orders: 141 },
+    { date: "7/22", sales: 8140, previous: 7440, orders: 166 },
+    { date: "7/23", sales: 7250, previous: 7810, orders: 149 },
+    { date: "7/24", sales: 9340, previous: 7690, orders: 191 },
+    { date: "7/25", sales: 8870, previous: 7890, orders: 181 },
+    { date: "7/26", sales: 10120, previous: 7980, orders: 207 },
+    { date: "7/27", sales: 10292, previous: 8140, orders: 212 },
+  ],
+  products: [
+    {
+      id: "p-104",
+      sku: "LL-A104",
+      title: "Aurora Sunset Lamp",
+      image: "https://images.unsplash.com/photo-1507473885765-e6ed057f782c?auto=format&fit=crop&w=160&q=80",
+      revenue: "$14,280",
+      units: 326,
+      stock: 42,
+      daysOfStock: 4,
+      status: "risk",
+    },
+    {
+      id: "p-208",
+      sku: "LL-D208",
+      title: "Cloud Aroma Diffuser",
+      image: "https://images.unsplash.com/photo-1608571423902-eed4a5ad8108?auto=format&fit=crop&w=160&q=80",
+      revenue: "$10,964",
+      units: 284,
+      stock: 52,
+      daysOfStock: 6,
+      status: "low",
+    },
+    {
+      id: "p-421",
+      sku: "LL-0421",
+      title: "Halo Mini Humidifier",
+      image: "https://images.unsplash.com/photo-1583845112203-29329902332e?auto=format&fit=crop&w=160&q=80",
+      revenue: "$8,410",
+      units: 241,
+      stock: 18,
+      daysOfStock: 3,
+      status: "risk",
+    },
+    {
+      id: "p-315",
+      sku: "LL-K315",
+      title: "Flexi Sink Rack",
+      image: "https://images.unsplash.com/photo-1556911220-bff31c812dba?auto=format&fit=crop&w=160&q=80",
+      revenue: "$6,228",
+      units: 173,
+      stock: 214,
+      daysOfStock: 31,
+      status: "healthy",
+    },
+  ],
+  automations: [
+    {
+      id: "auto-daily-brief",
+      name: "每日经营简报",
+      schedule: "每天 09:00",
+      scope: "Luma Living US",
+      nextRun: "明天 09:00",
+      lastResult: "今天 09:01 · 成功",
+      enabled: true,
+      kind: "report",
+    },
+    {
+      id: "auto-low-stock",
+      name: "低库存预警",
+      schedule: "每 4 小时",
+      scope: "库存天数 < 7 天",
+      nextRun: "今天 16:00",
+      lastResult: "今天 12:00 · 发现 3 项",
+      enabled: true,
+      kind: "alert",
+    },
+  ],
+  activity: [
+    { id: "act-1", title: "每日经营简报", meta: "09:01 · 自动任务", status: "success" },
+    { id: "act-2", title: "读取近 7 天订单", meta: "昨天 17:42 · 你", status: "success" },
+    { id: "act-3", title: "调整 3 个 SKU 库存", meta: "昨天 16:08 · Mia", status: "success" },
+  ],
+  alerts: [
+    { id: "alert-1", level: "warning", text: "3 个热销 SKU 的可售库存不足 7 天" },
+    { id: "alert-2", level: "info", text: "退款率较上周上升 0.6 个百分点" },
+  ],
+  dataAsOf: "2026-07-27 14:30",
+};
+
+export function cloneDashboard(): DashboardSnapshot {
+  return structuredClone(dashboard);
+}

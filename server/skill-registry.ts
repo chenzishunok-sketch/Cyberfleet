@@ -1,0 +1,545 @@
+import { chmod, readFile, writeFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import type {
+  SkillDefinition,
+  SkillStatus,
+  SkillsCatalogResponse,
+  SkillConfigField,
+} from "../shared/contracts.ts";
+import { getFastMossTools } from "./mcp-client.ts";
+import { getChuhaijiangTools } from "./chuhaijiang-client.ts";
+import {
+  getChuhaijiangRuntimeConfig,
+  getMiaoshouRuntimeConfig,
+  getTmapiRuntimeConfig,
+  getWebSearchRuntimeConfig,
+} from "./runtime-config.ts";
+import { getTikTokConnectionStatus } from "./tiktok-auth.ts";
+
+// ─── 内置 Skill 定义 ──────────────────────────────────────────
+
+const BUILTIN_SKILLS: SkillDefinition[] = [
+  {
+    id: "tiktok-shop",
+    name: "TikTok Shop",
+    description: "TikTok Shop 官方 API，提供商品、订单、履约、财务、促销、售后等全链路运营能力。",
+    icon: "ShoppingBag",
+    version: "1.0.0",
+    category: "analytics",
+    configFields: [],
+    builtin: true,
+    scenes: [
+      "market", "analytics", "catalog", "global", "orders",
+      "fulfillment", "logistics", "aftersales", "finance", "promotions", "shop",
+    ],
+  },
+  {
+    id: "miaoshou",
+    name: "妙手 ERP",
+    description: "妙手 ERP 开放平台，提供 1688 货源采集、AI 类目匹配、产品翻译、一键上架 TikTok、采购管理等能力。",
+    icon: "PackagePlus",
+    version: "1.0.0",
+    category: "collection",
+    configFields: [
+      { key: "appKey", label: "App Key", type: "text", required: true, placeholder: "妙手开放平台 App Key" },
+      { key: "appSecret", label: "App Secret", type: "password", required: true, placeholder: "妙手开放平台 App Secret" },
+      { key: "baseUrl", label: "API 地址", type: "url", required: false, placeholder: "https://openapi-erp.91miaoshou.com" },
+    ],
+    builtin: true,
+    scenes: [
+      "collect_item", "common_collect_box", "tiktok_collect_box",
+      "tiktok_categories", "ai_match_category", "supplement_info", "claim_to_platform",
+      "miaoshou_shops",
+      "publish_to_tiktok", "publish_records", "price_templates",
+      "miaoshou_packages", "miaoshou_returns", "miaoshou_purchase_orders", "miaoshou_inventory",
+    ],
+  },
+  {
+    id: "tmapi-1688",
+    name: "1688 货源数据",
+    description: "TMAPI 1688 商品数据，用于读取真实商品详情、SKU、采购价、库存、重量和供应商信息。",
+    icon: "PackageSearch",
+    version: "1.0.0",
+    category: "collection",
+    configFields: [
+      { key: "apiToken", label: "API Token", type: "password", required: true, placeholder: "TMAPI 控制台 API Token" },
+      { key: "baseUrl", label: "API 地址", type: "url", required: false, placeholder: "http://api.tmapi.top" },
+    ],
+    builtin: true,
+    scenes: ["item_detail", "item_detail_by_url", "supplier_product_snapshot"],
+  },
+  {
+    id: "web-search",
+    name: "互联网搜索",
+    description: "联网检索最新平台政策、市场趋势、竞品和行业资料，回答保留标题、时间和原始网址。",
+    icon: "Globe2",
+    version: "1.0.0",
+    category: "analytics",
+    configFields: [
+      { key: "apiKey", label: "Tavily API Key", type: "password", required: true, placeholder: "tvly-..." },
+      { key: "baseUrl", label: "API 地址", type: "url", required: false, placeholder: "https://api.tavily.com" },
+    ],
+    builtin: true,
+    scenes: ["web_search", "news_search", "policy_research", "competitor_research"],
+  },
+  {
+    id: "chuhaijiang",
+    name: "出海匠选品数据",
+    description: "出海匠 TikTok 美区电商数据（MCP），提供爆品搜索、商品详情、关联商品、达人、视频、店铺、广告、直播数据与 Amazon 交叉验证。",
+    icon: "Radar",
+    version: "1.0.0",
+    category: "analytics",
+    configFields: [
+      { key: "apiKey", label: "API Key", type: "password", required: true, placeholder: "sk_live_..." },
+      { key: "baseUrl", label: "MCP 地址", type: "url", required: false, placeholder: "https://mcp.gateway.chuhaijiang.com/mcp" },
+    ],
+    builtin: true,
+    scenes: [
+      "chuhaijiang_search", "chuhaijiang_detail", "chuhaijiang_related", "chuhaijiang_amazon",
+    ],
+  },
+];
+
+// ─── 持久化存储 ───────────────────────────────────────────────
+
+interface StoredSkillState {
+  installed: boolean;
+  enabled: boolean;
+  config: Record<string, string>;
+}
+
+interface SkillsStore {
+  [skillId: string]: StoredSkillState;
+}
+
+const DATA_DIR = join(process.cwd(), ".data");
+const SKILLS_FILE = join(DATA_DIR, "skills.json");
+
+// 内存缓存：对话流程每次都会调用 getEnabledSkills/getSkillTools，
+// 原实现每次都读盘 5+ 次 I/O。缓存后只有首次或写后才读盘。
+let cachedStore: SkillsStore | undefined;
+let storeReadPromise: Promise<SkillsStore> | undefined;
+
+async function readStore(): Promise<SkillsStore> {
+  if (cachedStore) return cachedStore;
+  if (storeReadPromise) return storeReadPromise;
+  storeReadPromise = (async () => {
+    try {
+      const content = await readFile(SKILLS_FILE, "utf-8");
+      cachedStore = JSON.parse(content) as SkillsStore;
+    } catch {
+      cachedStore = {};
+    }
+    storeReadPromise = undefined;
+    return cachedStore;
+  })();
+  return storeReadPromise;
+}
+
+async function writeStore(store: SkillsStore): Promise<void> {
+  cachedStore = store;
+  // 配置变更后清除能力描述和工具缓存，下次读取时重建
+  cachedSkillTools = undefined;
+  cachedAbilityDesc = undefined;
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(SKILLS_FILE, JSON.stringify(store, null, 2), "utf-8");
+  // skills.json 存有第三方密钥，权限与 tiktok-authorization.json 一致收敛为 0600
+  await chmod(SKILLS_FILE, 0o600).catch(() => undefined);
+}
+
+// ─── 核心逻辑 ─────────────────────────────────────────────────
+
+function isConfigured(skill: SkillDefinition, config: Record<string, string>): boolean {
+  return skill.configFields
+    .filter((field) => field.required)
+    .every((field) => Boolean(config[field.key]?.trim()));
+}
+
+function getStoredState(store: SkillsStore, skillId: string): StoredSkillState {
+  return store[skillId] ?? { installed: false, enabled: false, config: {} };
+}
+
+function maskConfig(skill: SkillDefinition, config: Record<string, string>): Record<string, string> {
+  const masked: Record<string, string> = {};
+  for (const field of skill.configFields) {
+    const value = config[field.key];
+    if (!value) {
+      masked[field.key] = "";
+    } else if (field.type === "password") {
+      masked[field.key] = value.length > 4 ? `${value.slice(0, 2)}${"*".repeat(value.length - 4)}${value.slice(-2)}` : "****";
+    } else {
+      masked[field.key] = value;
+    }
+  }
+  return masked;
+}
+
+export async function getSkillsCatalog(): Promise<SkillsCatalogResponse> {
+  const store = await readStore();
+  const miaoshouConfig = getMiaoshouRuntimeConfig();
+  const tmapiConfig = getTmapiRuntimeConfig();
+  const webSearchConfig = getWebSearchRuntimeConfig();
+  const chuhaijiangConfig = getChuhaijiangRuntimeConfig();
+  const tiktokConnection = await getTikTokConnectionStatus().catch(() => ({ connected: false as const }));
+
+  const statuses = BUILTIN_SKILLS.map((skill) => {
+    const storedEntry = store[skill.id];
+    const stored = getStoredState(store, skill.id);
+    const enabled = skill.builtin ? (storedEntry?.enabled !== false) : stored.enabled;
+    if (skill.id === "tiktok-shop") {
+      return {
+        id: skill.id,
+        installed: true,
+        enabled,
+        configured: tiktokConnection.connected,
+        config: {},
+        connectionState: tiktokConnection.connected ? "connected" as const : "not_configured" as const,
+        configSource: tiktokConnection.connected ? "oauth" as const : "none" as const,
+      };
+    }
+    if (skill.id === "miaoshou") {
+      const effectiveConfig = {
+        appKey: miaoshouConfig.appKey,
+        appSecret: miaoshouConfig.appSecret,
+        baseUrl: miaoshouConfig.baseUrl,
+      };
+      const configured = isConfigured(skill, effectiveConfig);
+      return {
+        id: skill.id,
+        installed: true,
+        enabled,
+        configured,
+        config: maskConfig(skill, effectiveConfig),
+        connectionState: configured ? "configured" as const : "not_configured" as const,
+        configSource: miaoshouConfig.source === "missing" ? "none" as const : miaoshouConfig.source,
+      };
+    }
+    if (skill.id === "tmapi-1688") {
+      const effectiveConfig = { apiToken: tmapiConfig.apiToken, baseUrl: tmapiConfig.baseUrl };
+      const configured = isConfigured(skill, effectiveConfig);
+      return {
+        id: skill.id,
+        installed: true,
+        enabled,
+        configured,
+        config: maskConfig(skill, effectiveConfig),
+        connectionState: configured ? "configured" as const : "not_configured" as const,
+        configSource: tmapiConfig.source === "missing" ? "none" as const : tmapiConfig.source,
+      };
+    }
+    if (skill.id === "web-search") {
+      const effectiveConfig = { apiKey: webSearchConfig.apiKey, baseUrl: webSearchConfig.baseUrl };
+      const configured = isConfigured(skill, effectiveConfig);
+      return {
+        id: skill.id,
+        installed: true,
+        enabled,
+        configured,
+        config: maskConfig(skill, effectiveConfig),
+        connectionState: configured ? "configured" as const : "not_configured" as const,
+        configSource: webSearchConfig.source === "missing" ? "none" as const : webSearchConfig.source,
+      };
+    }
+    if (skill.id === "chuhaijiang") {
+      const effectiveConfig = { apiKey: chuhaijiangConfig.apiKey, baseUrl: chuhaijiangConfig.baseUrl };
+      const configured = isConfigured(skill, effectiveConfig);
+      return {
+        id: skill.id,
+        installed: true,
+        enabled,
+        configured,
+        config: maskConfig(skill, effectiveConfig),
+        connectionState: configured ? "configured" as const : "not_configured" as const,
+        configSource: chuhaijiangConfig.source === "missing" ? "none" as const : chuhaijiangConfig.source,
+      };
+    }
+    return {
+      id: skill.id,
+      installed: skill.builtin ? true : stored.installed,
+      enabled,
+      configured: skill.configFields.length === 0 || isConfigured(skill, stored.config),
+      config: maskConfig(skill, stored.config),
+    };
+  });
+
+  return { skills: BUILTIN_SKILLS, statuses };
+}
+
+export async function installSkill(skillId: string): Promise<SkillStatus> {
+  const skill = BUILTIN_SKILLS.find((s) => s.id === skillId);
+  if (!skill) throw new Error(`未知 Skill：${skillId}`);
+
+  const store = await readStore();
+  store[skillId] = {
+    ...getStoredState(store, skillId),
+    installed: true,
+    enabled: true,
+  };
+  await writeStore(store);
+
+  const status = getStoredState(store, skillId);
+  return {
+    id: skillId,
+    installed: true,
+    enabled: status.enabled,
+    configured: skill.configFields.length === 0 || isConfigured(skill, status.config),
+    config: maskConfig(skill, status.config),
+  };
+}
+
+export async function uninstallSkill(skillId: string): Promise<void> {
+  const skill = BUILTIN_SKILLS.find((s) => s.id === skillId);
+  if (!skill) throw new Error(`未知 Skill：${skillId}`);
+  if (skill.builtin) throw new Error("内置 Skill 不能卸载，只能禁用。");
+
+  const store = await readStore();
+  delete store[skillId];
+  await writeStore(store);
+}
+
+export async function enableSkill(skillId: string): Promise<SkillStatus> {
+  const skill = BUILTIN_SKILLS.find((s) => s.id === skillId);
+  if (!skill) throw new Error(`未知 Skill：${skillId}`);
+
+  const store = await readStore();
+  store[skillId] = { ...getStoredState(store, skillId), installed: true, enabled: true };
+  await writeStore(store);
+
+  const status = getStoredState(store, skillId);
+  return {
+    id: skillId,
+    installed: true,
+    enabled: true,
+    configured: skill.configFields.length === 0 || isConfigured(skill, status.config),
+    config: maskConfig(skill, status.config),
+  };
+}
+
+export async function disableSkill(skillId: string): Promise<SkillStatus> {
+  const skill = BUILTIN_SKILLS.find((s) => s.id === skillId);
+  if (!skill) throw new Error(`未知 Skill：${skillId}`);
+
+  const store = await readStore();
+  store[skillId] = { ...getStoredState(store, skillId), enabled: false };
+  await writeStore(store);
+
+  const status = getStoredState(store, skillId);
+  return {
+    id: skillId,
+    installed: status.installed,
+    enabled: false,
+    configured: skill.configFields.length === 0 || isConfigured(skill, status.config),
+    config: maskConfig(skill, status.config),
+  };
+}
+
+export async function updateSkillConfig(
+  skillId: string,
+  config: Record<string, string>,
+): Promise<SkillStatus> {
+  const skill = BUILTIN_SKILLS.find((s) => s.id === skillId);
+  if (!skill) throw new Error(`未知 Skill：${skillId}`);
+
+  const store = await readStore();
+  const existingEntry = store[skillId];
+  const current = getStoredState(store, skillId);
+  let runtimeBaseline: Record<string, string> = {};
+  if (skillId === "miaoshou") {
+    const runtime = getMiaoshouRuntimeConfig();
+    if (runtime.source !== "missing") {
+      runtimeBaseline = { appKey: runtime.appKey, appSecret: runtime.appSecret, baseUrl: runtime.baseUrl };
+    }
+  }
+  if (skillId === "tmapi-1688") {
+    const runtime = getTmapiRuntimeConfig();
+    if (runtime.source !== "missing") {
+      runtimeBaseline = { apiToken: runtime.apiToken, baseUrl: runtime.baseUrl };
+    }
+  }
+  if (skillId === "web-search") {
+    const runtime = getWebSearchRuntimeConfig();
+    if (runtime.source !== "missing") {
+      runtimeBaseline = { apiKey: runtime.apiKey, baseUrl: runtime.baseUrl };
+    }
+  }
+  if (skillId === "chuhaijiang") {
+    const runtime = getChuhaijiangRuntimeConfig();
+    if (runtime.source !== "missing") {
+      runtimeBaseline = { apiKey: runtime.apiKey, baseUrl: runtime.baseUrl };
+    }
+  }
+  const filteredUpdates: Record<string, string> = Object.fromEntries(Object.entries(config).filter(([key, value]) => {
+    const field = skill.configFields.find((item) => item.key === key);
+    return !(field?.type === "password" && (!value.trim() || value.includes("*")));
+  }));
+  const merged = { ...runtimeBaseline, ...current.config, ...filteredUpdates };
+
+  // 清除空值
+  for (const key of Object.keys(merged)) {
+    if (!merged[key]?.trim()) delete merged[key];
+  }
+
+  store[skillId] = {
+    ...current,
+    installed: skill.builtin ? true : current.installed,
+    enabled: skill.builtin ? existingEntry?.enabled !== false : current.enabled,
+    config: merged,
+  };
+  await writeStore(store);
+
+  const status = getStoredState(store, skillId);
+  return {
+    id: skillId,
+    installed: status.installed,
+    enabled: status.enabled,
+    configured: skill.configFields.length === 0 || isConfigured(skill, merged),
+    config: maskConfig(skill, merged),
+  };
+}
+
+// ─── 运行时查询 ───────────────────────────────────────────────
+
+interface EnabledSkillInfo {
+  definition: SkillDefinition;
+  config: Record<string, string>;
+}
+
+export async function getEnabledSkills(): Promise<EnabledSkillInfo[]> {
+  const store = await readStore();
+  const result: EnabledSkillInfo[] = [];
+  const miaoshouConfig = getMiaoshouRuntimeConfig();
+  const tmapiConfig = getTmapiRuntimeConfig();
+  const webSearchConfig = getWebSearchRuntimeConfig();
+  const chuhaijiangConfig = getChuhaijiangRuntimeConfig();
+  const tiktokConnection = await getTikTokConnectionStatus().catch(() => ({ connected: false as const }));
+
+  for (const skill of BUILTIN_SKILLS) {
+    const storedEntry = store[skill.id];
+    const stored = getStoredState(store, skill.id);
+    const installed = skill.builtin ? true : stored.installed;
+    const enabled = skill.builtin ? (storedEntry?.enabled !== false) : stored.enabled;
+    const effectiveConfig = skill.id === "miaoshou"
+      ? { appKey: miaoshouConfig.appKey, appSecret: miaoshouConfig.appSecret, baseUrl: miaoshouConfig.baseUrl }
+      : skill.id === "tmapi-1688"
+        ? { apiToken: tmapiConfig.apiToken, baseUrl: tmapiConfig.baseUrl }
+        : skill.id === "web-search"
+          ? { apiKey: webSearchConfig.apiKey, baseUrl: webSearchConfig.baseUrl }
+          : skill.id === "chuhaijiang"
+            ? { apiKey: chuhaijiangConfig.apiKey, baseUrl: chuhaijiangConfig.baseUrl }
+            : stored.config;
+    const configured = skill.id === "tiktok-shop"
+      ? tiktokConnection.connected
+      : skill.configFields.length === 0 || isConfigured(skill, effectiveConfig);
+
+    if (installed && enabled && configured) {
+      result.push({ definition: skill, config: effectiveConfig });
+    }
+  }
+
+  return result;
+}
+
+// 对话流程中 getSkillTools/getSkillAbilityDescriptions 每步 ReAct 都调用，
+// 内部 getEnabledSkills 会调 getTikTokConnectionStatus（文件 I/O + 可能刷新 token）。
+// 短 TTL 缓存避免同一次对话内重复计算，skill 配置变更时 60s 内自动过期。
+let cachedSkillTools: { at: number; value: unknown[] } | undefined;
+let cachedAbilityDesc: { at: number; value: string } | undefined;
+const SKILL_CACHE_TTL_MS = 60_000;
+
+/** 聚合所有已启用 Skill 的 tools 定义（含 MCP 工具），供 LLM 使用 */
+export async function getSkillTools(): Promise<unknown[]> {
+  const now = Date.now();
+  if (cachedSkillTools && now - cachedSkillTools.at < SKILL_CACHE_TTL_MS) {
+    return cachedSkillTools.value;
+  }
+  const enabledSkills = await getEnabledSkills();
+  const skillTools: unknown[] = [];
+
+  for (const { definition } of enabledSkills) {
+    if (definition.id === "miaoshou") {
+      skillTools.push({
+        type: "function",
+        function: {
+          name: "miaoshou_query",
+          description: "查询妙手 ERP 数据，包括 1688 采集、商品上架、采购管理、库存查询等。",
+          parameters: {
+            type: "object",
+            properties: {
+              scene: {
+                type: "string",
+                description: "查询场景：collect_item, common_collect_box, tiktok_collect_box, tiktok_categories, ai_match_category, supplement_info, claim_to_platform, miaoshou_shops, publish_to_tiktok, publish_records, price_templates, miaoshou_packages, miaoshou_returns, miaoshou_purchase_orders, miaoshou_inventory",
+              },
+              query: {
+                type: "string",
+                description: "查询参数（如 1688 链接、商品 ID 等）",
+              },
+            },
+            required: ["scene"],
+          },
+        },
+      });
+    }
+    if (definition.id === "web-search") {
+      skillTools.push({
+        type: "function",
+        function: {
+          name: "web_search",
+          description: "联网搜索公开信息。用户询问‘最新、当前、近期、今天’的政策、市场、趋势、新闻、竞品或行业资料时必须使用。这是只读工具；不用于查询店铺内部订单和商品数据。",
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "完整、明确的搜索问题。" },
+              topic: { type: "string", enum: ["general", "news"], description: "政策和行业资料用 general；近期新闻用 news。" },
+              timeRange: { type: "string", enum: ["day", "week", "month", "year"], description: "用户有明确时效要求时使用。" },
+              maxResults: { type: "integer", minimum: 1, maximum: 8 },
+              includeDomains: { type: "array", items: { type: "string" }, maxItems: 10 },
+              excludeDomains: { type: "array", items: { type: "string" }, maxItems: 10 },
+            },
+            required: ["query"],
+          },
+        },
+      });
+    }
+    // 未来可以添加更多 Skill 的工具定义
+  }
+
+  // 合并 FastMoss MCP 工具
+  try {
+    const mcpTools = await getFastMossTools();
+    skillTools.push(...mcpTools);
+  } catch {
+    // MCP 工具加载失败不影响其他工具
+  }
+
+  // 合并出海匠 MCP 只读工具
+  try {
+    const chuhaijiangTools = await getChuhaijiangTools();
+    skillTools.push(...chuhaijiangTools);
+  } catch {
+    // 出海匠工具加载失败不影响其他工具
+  }
+
+  cachedSkillTools = { at: now, value: skillTools };
+  return skillTools;
+}
+
+/** 获取已启用 Skill 的能力描述，用于注入 system prompt */
+export async function getSkillAbilityDescriptions(): Promise<string> {
+  const now = Date.now();
+  if (cachedAbilityDesc && now - cachedAbilityDesc.at < SKILL_CACHE_TTL_MS) {
+    return cachedAbilityDesc.value;
+  }
+  const enabledSkills = await getEnabledSkills();
+  if (enabledSkills.length === 0) {
+    cachedAbilityDesc = { at: now, value: "" };
+    return "";
+  }
+
+  const descriptions = enabledSkills.map(({ definition }) => {
+    return `${definition.name}：${definition.description} 提供的场景：${definition.scenes.join(", ")}`;
+  });
+
+  const value = "\n\n已启用的 Skill 能力：\n" + descriptions.join("\n");
+  cachedAbilityDesc = { at: now, value };
+  return value;
+}

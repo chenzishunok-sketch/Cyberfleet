@@ -1,0 +1,52 @@
+{
+  "name": "cross-border-ecommerce-multi-agent-system",
+  "private": true,
+  "version": "0.9.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently --restart-tries -1 --restart-after 1000 -n web,api -c cyan,magenta \"vite --host 127.0.0.1 --port 5182\" \"tsx watch server/index.ts\"",
+    "kill": "lsof -ti:5182,8795,8796 | xargs -r kill -9 2>/dev/null; sleep 1; echo '已清场 (5182/8795/8796)'",
+    "dev:0220": "WEB_PORT=5220 API_PORT=8220 PORT=8220 KOL_BRIDGE_PORT=8221 FRONTEND_URL=http://localhost:5220 ALLOWED_FRONTEND_ORIGINS=http://localhost:5220,http://127.0.0.1:5220 concurrently --restart-tries -1 --restart-after 1000 -n web,api -c cyan,magenta \"vite --host 127.0.0.1 --port 5220\" \"tsx watch server/index.ts\"",
+    "kill:0220": "lsof -ti:5220,8220,8221 | xargs -r kill -9 2>/dev/null; sleep 1; echo '已清场 0220 实例 (5220/8220/8221)'",
+    "ports": "for p in 5182 8795 8796; do pid=$(lsof -i :$p -sTCP:LISTEN -t 2>/dev/null | tr '\\n' ' '); echo \"端口 $p → ${pid:-空闲}\"; done",
+    "build": "tsc -b && vite build",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -b --pretty false",
+    "feishu": "lark-cli",
+    "version:patch": "npm version --no-git-tag-version patch && node scripts/version-release.mjs patch",
+    "version:minor": "npm version --no-git-tag-version minor && node scripts/version-release.mjs minor",
+    "version:major": "npm version --no-git-tag-version major && node scripts/version-release.mjs major",
+    "changelog": "node scripts/version-release.mjs changelog-only"
+  },
+  "dependencies": {
+    "@esotericsoftware/spine-pixi-v8": "~4.2.0",
+    "@larksuite/cli": "1.0.79",
+    "@larksuiteoapi/node-sdk": "1.71.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.2.1",
+    "lucide-react": "^0.468.0",
+    "pixi.js": "^8.19.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "recharts": "^3.5.1",
+    "undici": "^7.29.0",
+    "ws": "^8.21.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.5",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.3",
+    "@types/react-dom": "^19.0.2",
+    "@types/supertest": "^7.2.1",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.0.4",
+    "concurrently": "^9.1.2",
+    "supertest": "^7.1.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^8.1.5",
+    "vitest": "^3.2.4"
+  }
+}

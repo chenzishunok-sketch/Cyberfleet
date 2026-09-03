@@ -1,0 +1,882 @@
+import type { AgentContext } from "./digital-employees.ts";
+
+export type Trend = "up" | "down" | "flat";
+
+export interface StoreContext {
+  id: string;
+  name: string;
+  region: string;
+  currency: string;
+  timezone: string;
+  connected: boolean;
+}
+
+export interface Metric {
+  label: string;
+  value: string;
+  delta: string;
+  trend: Trend;
+  helper?: string;
+}
+
+export interface SalesPoint {
+  date: string;
+  sales: number;
+  previous: number;
+  orders: number;
+}
+
+export interface ProductRow {
+  id: string;
+  sku: string;
+  title: string;
+  image: string;
+  revenue: string;
+  units: number;
+  stock: number;
+  daysOfStock?: number;
+  status: "healthy" | "low" | "risk";
+}
+
+export interface Automation {
+  id: string;
+  name: string;
+  schedule: string;
+  scope: string;
+  nextRun: string;
+  lastResult: string;
+  enabled: boolean;
+  kind: "report" | "alert";
+}
+
+export interface ActivityItem {
+  id: string;
+  title: string;
+  meta: string;
+  status: "success" | "waiting" | "running" | "failed";
+}
+
+export interface DashboardSnapshot {
+  dataSource: "tiktok" | "demo" | "unavailable";
+  store: StoreContext;
+  metrics: Metric[];
+  salesSeries: SalesPoint[];
+  products: ProductRow[];
+  automations: Automation[];
+  activity: ActivityItem[];
+  alerts: Array<{ id: string; level: "warning" | "info"; text: string }>;
+  dataAsOf: string;
+}
+
+export interface RunStep {
+  id: string;
+  label: string;
+  detail: string;
+  status: "done" | "running" | "pending" | "failed";
+}
+
+export interface FieldDiff {
+  target: string;
+  field: string;
+  before: string;
+  after: string;
+}
+
+export type ActionPlanStatus = "pending" | "executing" | "verification_pending" | "approved" | "rejected" | "expired";
+
+export interface ActionPlan {
+  id: string;
+  tool: "inventory.update" | "price.update" | "product.activate" | "product.deactivate" | "automation.create" | "miaoshou.operation" | "pricing.update";
+  title: string;
+  summary: string;
+  store: string;
+  risk: "low" | "medium" | "high";
+  diffs: FieldDiff[];
+  impactCount?: number;
+  expiresAt: string;
+  status: ActionPlanStatus;
+  planHash: string;
+}
+
+export type WorkflowStatus =
+  | "draft"
+  | "running"
+  | "waiting_input"
+  | "waiting_confirmation"
+  | "verification_pending"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+type WorkflowStepStatus = "pending" | "running" | "completed" | "failed";
+
+export interface WorkflowStep {
+  id: string;
+  label: string;
+  status: WorkflowStepStatus;
+  detail?: string;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface WorkflowShopOption {
+  id: string;
+  name: string;
+  site: string;
+  /** 妙手数字店铺 ID（TikTok OAuth 密文店铺需要先解析） */
+  miaoshouShopId?: string;
+}
+
+export type PricingFieldSource = "1688" | "miaoshou" | "tiktok" | "csv" | "category_rule" | "default" | "manual";
+
+export interface SkuPricingInput {
+  salePriceThb: number;
+  purchasePriceCny: number;
+  weightKg: number;
+  exchangeRateCnyToThb: number;
+  domesticLogisticsCny: number;
+  cloudWarehouseCny: number;
+  buyerLocalDeliveryThb: number;
+  advertisingThb: number;
+  creatorCommissionRate: number;
+  taxRate: number;
+  categoryCommissionRate: number;
+  crossBorderThbPer10g: number;
+  transactionRate: number;
+  infrastructureFeeThb: number;
+  growthSupportRate: number;
+  merchantDiscountThb: number;
+  platformSubsidyThb: number;
+  platformActivityFeeThb: number;
+}
+
+export interface SkuPricingResult {
+  purchaseCostThb: number;
+  domesticLogisticsThb: number;
+  cloudWarehouseThb: number;
+  crossBorderLogisticsThb: number;
+  localDeliveryThb: number;
+  categoryCommissionThb: number;
+  transactionFeeThb: number;
+  infrastructureFeeThb: number;
+  growthSupportFeeThb: number;
+  taxThb: number;
+  advertisingThb: number;
+  creatorCommissionThb: number;
+  platformActivityFeeThb: number;
+  expectedRevenueThb: number;
+  expectedCostThb: number;
+  expectedProfitThb: number;
+  expectedMargin: number;
+  breakEvenPriceThb: number;
+  profitable: boolean;
+}
+
+export interface SkuActualSettlementInput {
+  period?: string;
+  soldQuantity?: number;
+  tiktokSettlementThb?: number;
+  logisticsDeductionThb?: number;
+  advertisingThb?: number;
+  creatorCommissionThb?: number;
+}
+
+export interface SkuActualSettlementResult {
+  baseCostThb: number;
+  actualCostThb: number;
+  actualProfitThb: number;
+  actualMargin: number;
+  profitable: boolean;
+}
+
+export interface SkuPricingRecord {
+  id: string;
+  workflowId: string;
+  sourceItemId?: string;
+  sourceUrl?: string;
+  commonDetailId?: string;
+  platformDetailId?: string;
+  shopId?: string;
+  tiktokProductId?: string;
+  tiktokSkuId?: string;
+  /** TikTok 商品当前生命周期；INACTIVE 表示最近一次完整同步中不在在售列表。 */
+  tiktokStatus?: "ACTIVATE" | "INACTIVE";
+  productTitle?: string;
+  productImageUrl?: string;
+  availableStock?: number;
+  committedStock?: number;
+  /** 当前生效的 TikTok 促销活动价；不存在活动时为空。 */
+  activityPriceThb?: number;
+  skuKey: string;
+  skuName: string;
+  sellerSku?: string;
+  categoryId?: string;
+  categoryName?: string;
+  categoryPath?: string;
+  currency: "THB";
+  input: SkuPricingInput;
+  result: SkuPricingResult;
+  actualInput?: SkuActualSettlementInput;
+  actualResult?: SkuActualSettlementResult;
+  fieldSources: Record<string, PricingFieldSource>;
+  missingFields: string[];
+  calculatedAt: string;
+}
+
+export interface SupplierSkuPriceMatch {
+  recordId: string;
+  targetSkuId: string;
+  targetSkuName: string;
+  sourceSkuId: string;
+  sourceSkuName: string;
+  purchasePriceCny: number;
+  method: "exact" | "shared_price" | "sequence";
+  confidence: "high" | "medium";
+}
+
+export interface SupplierPricingPreview {
+  sourceUrl: string;
+  sourceItemId: string;
+  sourceTitle: string;
+  targetSkuCount: number;
+  sourceSkuCount: number;
+  matchedCount: number;
+  requiresConfirmation: boolean;
+  matches: SupplierSkuPriceMatch[];
+}
+
+export interface PricingDefaults {
+  exchangeRateCnyToThb: number;
+  domesticLogisticsCny: number;
+  cloudWarehouseCny: number;
+  buyerLocalDeliveryThb: number;
+  advertisingThb: number;
+  creatorCommissionRate: number;
+}
+
+export interface PricingRecordSummary {
+  totalSkus: number;
+  profitableSkus: number;
+  lossSkus: number;
+  minProfitThb: number;
+  maxProfitThb: number;
+  minMargin: number;
+}
+
+export interface ChatImageAttachment {
+  id: string;
+  name: string;
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  dataUrl: string;
+}
+
+export interface SourcingCandidate {
+  itemId: string;
+  productUrl: string;
+  title: string;
+  imageUrl: string;
+  supplierName: string;
+  supplierLocation: string;
+  supplierType: string;
+  shopYears?: number;
+  supplierScore?: number;
+  recommendationScore: number;
+  purchasePriceCny: number;
+  minimumOrderQuantity: number;
+  salesCount: number;
+  ordersCount: number;
+  repurchaseRate?: number;
+  stock?: number;
+  weightKg: number;
+  weightEstimated: boolean;
+  domesticShippingCny: number;
+  salePriceThb: number;
+  suggestedSalePriceThb: number;
+  expectedCostThb: number;
+  expectedProfitThb: number;
+  expectedMargin: number;
+  breakEvenPriceThb: number;
+  tags: string[];
+  warnings: string[];
+}
+
+export interface ProductPublishWorkflowRun {
+  id: string;
+  type: "product_publish";
+  title: string;
+  status: WorkflowStatus;
+  sourceUrl: string;
+  targetPlatform: "tiktok";
+  shopId?: string;
+  shopName?: string;
+  shopSite?: string;
+  /** 妙手数字店铺 ID，由 OAuth 密文解析而来；妙手 API 只接受数字 ID */
+  miaoshouShopId?: string;
+  targetLanguage?: string;
+  sourceItemId?: string;
+  commonDetailId?: string;
+  platformDetailId?: string;
+  tiktokProductId?: string;
+  claimedToShop?: boolean;
+  categoryId?: string;
+  productTitle?: string;
+  publishRequestId?: string;
+  publishPrice?: number;
+  currency?: string;
+  pricingDefaults?: PricingDefaults;
+  pricingSkus?: SkuPricingRecord[];
+  pricingSummary?: PricingRecordSummary;
+  pricingConfirmed?: boolean;
+  packageDimensions?: { length: number; width: number; height: number };
+  requestedTitle?: string;
+  requestedDescription?: string;
+  editPreview?: {
+    skuCount: number;
+    changes: Array<{ field: string; before: string; after: string }>;
+  };
+  confirmationKind?: "workflow_start" | "product_edit" | "product_publish";
+  steps: WorkflowStep[];
+  warnings: string[];
+  readinessIssues?: string[];
+  requiredInput?:
+    | {
+        kind: "shop";
+        prompt: string;
+        options: WorkflowShopOption[];
+      }
+    | {
+        kind: "product_data";
+        prompt: string;
+        issues: string[];
+      }
+    | {
+        kind: "product_edit";
+        prompt: string;
+        missing: Array<"publishPrice" | "packageDimensions">;
+      }
+    | {
+        kind: "pricing";
+        prompt: string;
+        missing: string[];
+      };
+  error?: string;
+  summary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FlashSaleSku {
+  id: string;
+  sellerSku?: string;
+  availableStock: number;
+}
+
+export interface FlashSaleWorkflowRun {
+  id: string;
+  type: "flash_sale";
+  title: string;
+  status: WorkflowStatus;
+  productId: string;
+  productTitle?: string;
+  shopId?: string;
+  shopName?: string;
+  shopRegion?: string;
+  activityTitle: string;
+  startAt: string;
+  endAt: string;
+  priceAmount: string;
+  currency: string;
+  skuSelection: { mode: "all" } | { mode: "include"; skuIds: string[] };
+  skuQuantityLimit: number;
+  quantityPerUser: number;
+  selectedSkus: FlashSaleSku[];
+  activityId?: string;
+  activityStatus?: string;
+  createRequestId?: string;
+  bindRequestId?: string;
+  confirmationKind?: "flash_sale";
+  steps: WorkflowStep[];
+  warnings: string[];
+  error?: string;
+  summary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface KolCreator {
+  id: string;
+  oecId?: string;
+  nickname: string;
+  handle?: string;
+  followerCount: number;
+  category?: string;
+  avatar?: string;
+}
+
+export interface KolStats {
+  totalInvited: number;
+  success: number;
+  pending: number;
+  failed: number;
+  totalCreators: number;
+  tasksTotal: number;
+}
+
+export interface KolOutreachWorkflowRun {
+  id: string;
+  type: "kol_outreach";
+  title: string;
+  status: WorkflowStatus;
+  shopId?: string;
+  filters: {
+    category?: string;
+    minFollowers?: number;
+  };
+  commissionRate: number;
+  message?: string;
+  batchSize: number;
+  requestedTarget: number;
+  totalTarget: number;
+  freeSample: boolean;
+  matchedCreators: KolCreator[];
+  selectedCreatorIds: string[];
+  result?: { success: number; failed: number; skipped: number; details?: string };
+  statsBefore?: KolStats;
+  statsAfter?: KolStats;
+  confirmationKind?: "kol_outreach";
+  steps: WorkflowStep[];
+  warnings: string[];
+  requiredInput?: {
+    kind: "kol_bridge" | "creator_data";
+    prompt: string;
+  };
+  error?: string;
+  summary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type BusinessWorkflowRun = ProductPublishWorkflowRun | FlashSaleWorkflowRun | KolOutreachWorkflowRun | DagWorkflowRun;
+
+// ─── DAG 工作流类型 ────────────────────────────────────────────
+
+/** DAG 节点类型 */
+export type DagNodeType = "task" | "gate" | "parallel" | "join" | "human_gate";
+
+/** DAG 节点定义 */
+export interface DagNodeDef {
+  /** 节点唯一标识 */
+  id: string;
+  /** 节点类型 */
+  type: DagNodeType;
+  /** 显示标签 */
+  label: string;
+  /** 负责执行的 Agent 角色 */
+  agent?: string;
+  /** 任务节点：执行器名称（在 executor 注册表中查找） */
+  executor?: string;
+  /** 门控节点：条件表达式，决定走哪条边 */
+  condition?: string;
+  /** 并行节点：并行分支的节点 ID 列表 */
+  branches?: string[][];
+  /** 人工确认节点：确认类型 */
+  confirmationKind?: string;
+  /** 人工确认节点：提示文案 */
+  prompt?: string;
+}
+
+/** DAG 边定义 */
+export interface DagEdgeDef {
+  /** 源节点 ID */
+  from: string;
+  /** 目标节点 ID */
+  to: string;
+  /** 条件表达式（仅 gate 节点的出边需要） */
+  condition?: string;
+}
+
+/** DAG 工作流定义（模板） */
+export interface DagDefinition {
+  /** 工作流类型标识 */
+  type: string;
+  /** 显示名称 */
+  name: string;
+  /** 描述 */
+  description?: string;
+  /** 所有节点 */
+  nodes: DagNodeDef[];
+  /** 所有边 */
+  edges: DagEdgeDef[];
+  /** 入口节点 ID */
+  entry: string;
+}
+
+/** DAG 节点运行时状态 */
+export type DagNodeState = "pending" | "running" | "completed" | "failed" | "skipped" | "waiting";
+
+/** DAG 节点运行时实例 */
+export interface DagNodeInstance {
+  id: string;
+  state: DagNodeState;
+  detail?: string;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+  /** 节点输出数据（传给后续节点） */
+  output?: Record<string, unknown>;
+}
+
+/** DAG 工作流运行实例 */
+export interface DagWorkflowRun {
+  id: string;
+  type: "dag";
+  title: string;
+  status: WorkflowStatus;
+  /** DAG 定义快照（运行时不可变） */
+  definition: DagDefinition;
+  /** 节点运行时状态 */
+  nodeStates: DagNodeInstance[];
+  /** 输入参数 */
+  input: Record<string, unknown>;
+  /** 当前活跃节点（正在执行或等待确认） */
+  activeNodeId?: string;
+  /** 等待确认的信息 */
+  pendingConfirmation?: {
+    nodeId: string;
+    kind: string;
+    prompt: string;
+  };
+  /** 执行结果 */
+  result?: {
+    success: boolean;
+    summary: string;
+    data?: Record<string, unknown>;
+  };
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowHistoryItem {
+  id: number;
+  runId: string;
+  stepId?: string;
+  eventType: "created" | "updated" | "migrated";
+  status: string;
+  detail?: string;
+  error?: string;
+  snapshot: BusinessWorkflowRun;
+  createdAt: string;
+}
+
+export interface WorkflowListResponse {
+  runs: BusinessWorkflowRun[];
+}
+
+export type MessageArtifact =
+  | {
+      kind: "analysis";
+      headline: string;
+      metrics: Metric[];
+      series: SalesPoint[];
+      currency: string;
+      insights: Array<{ label: string; text: string; tone: "positive" | "warning" | "neutral" }>;
+      source: string;
+    }
+  | {
+      kind: "products";
+      headline: string;
+      summary: string;
+      products: ProductRow[];
+      totalCount?: number;
+      source: string;
+    }
+  | {
+      kind: "records";
+      headline: string;
+      summary: string;
+      columns: Array<{ key: string; label: string }>;
+      rows: Array<Record<string, string>>;
+      source: string;
+      emptyLabel?: string;
+    }
+  | {
+      kind: "sourcing_candidates";
+      headline: string;
+      summary: string;
+      queryImageUrl: string;
+      totalCount: number;
+      candidates: SourcingCandidate[];
+      assumptions: {
+        requestedSalePriceThb?: number;
+        targetMargin: number;
+        taxRate: number;
+        categoryCommissionRate: number;
+        buyerLocalDeliveryThb: number;
+      };
+      source: string;
+    }
+  | {
+      kind: "approval";
+      plan: ActionPlan;
+    }
+  | {
+      kind: "receipt";
+      actionId: string;
+      title: string;
+      summary: string;
+      requestId: string;
+      requestLabel?: string;
+      completedAt: string;
+      diffs: FieldDiff[];
+      verificationLabel?: string;
+    }
+  | {
+      kind: "report";
+      title: string;
+      period: string;
+      executiveSummary: string;
+      sections: Array<{ title: string; body: string; stat?: string }>;
+      source: string;
+    }
+  | {
+      kind: "automation";
+      automation: Automation;
+      conditions: string[];
+    }
+  | {
+      kind: "suggestions";
+      prompts: string[];
+    }
+  | {
+      kind: "workflow";
+      run: BusinessWorkflowRun;
+    }
+  | {
+      kind: "visual_analysis";
+      headline: string;
+      summary: string;
+      sections: VisualSection[];
+      source?: string;
+    };
+
+export type VisualSection =
+  | {
+      type: "callout";
+      tone: "conclusion" | "judgment" | "recommendation" | "warning" | "info";
+      title?: string;
+      body: string;
+    }
+  | {
+      type: "data_highlights";
+      items: Array<{ label: string; value: string; unit?: string; trend?: "up" | "down" | "flat"; delta?: string; helper?: string }>;
+    }
+  | {
+      type: "bar_chart";
+      title?: string;
+      items: Array<{ label: string; value: number; valueLabel: string; delta?: string }>;
+      unit?: string;
+    }
+  | {
+      type: "donut_chart";
+      title?: string;
+      segments: Array<{ label: string; value: number; color?: string }>;
+      centerLabel?: string;
+      centerValue?: string;
+    }
+  | {
+      type: "radar_chart";
+      title?: string;
+      items: Array<{ label: string; value: number; max: number }>;
+    }
+  | {
+      type: "sparkline_row";
+      title?: string;
+      items: Array<{ label: string; data: number[]; value: string; delta?: string }>;
+    }
+  | {
+      type: "comparison_table";
+      title?: string;
+      columns?: Array<{ key: "primary" | "secondary"; label: string }>;
+      items: Array<{ label: string; primaryValue: string; secondaryValue?: string; highlight?: boolean }>;
+    }
+  | {
+      type: "insights";
+      items: Array<{ tone: "positive" | "warning" | "neutral"; label: string; text: string }>;
+    };
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  timestamp: string;
+  artifact?: MessageArtifact;
+  steps?: RunStep[];
+  followUps?: string[];
+}
+
+export interface ChatRequest {
+  message: string;
+  storeId: string;
+  mode?: "analysis" | "execute";
+  context?: AgentContext;
+  attachments?: ChatImageAttachment[];
+  history?: Array<Pick<ChatMessage, "role" | "content" | "artifact">>;
+}
+
+export interface ChatResponse {
+  message: ChatMessage;
+  runId: string;
+}
+
+// ─── 对话流式事件（SSE） ─────────────────────────────────────
+// 推送顺序：step*(0..N) → content_delta*(0..M) → final | error
+export type ChatStreamEvent =
+  | { type: "step"; step: RunStep }
+  | { type: "content_delta"; delta: string }
+  | { type: "final"; response: ChatResponse }
+  | { type: "error"; message: string };
+
+export type ChatStreamEmitter = (event: ChatStreamEvent) => void;
+
+export interface ActionResponse {
+  message: ChatMessage;
+  dashboard?: DashboardSnapshot;
+  actionStatus?: ActionPlanStatus;
+}
+
+export type TikTokCapabilityStatus =
+  | "ready"
+  | "confirmation_required"
+  | "reauthorization_required"
+  | "creator_authorization_required"
+  | "eligibility_check_required"
+  | "region_unavailable";
+
+export interface TikTokOperationCapability {
+  id: string;
+  title: string;
+  method: "GET" | "POST" | "PUT" | "DELETE";
+  path: string;
+  scopeKeys: string[];
+  effect: "query" | "task" | "write" | "destructive";
+  status: TikTokCapabilityStatus;
+  officialUrl: string;
+}
+
+export interface TikTokScopeCapability {
+  key: string;
+  label: string;
+  sceneId: string;
+  grantedInConsole: boolean;
+  grantedInToken: boolean;
+  status: TikTokCapabilityStatus;
+  operationCount: number;
+  note?: string;
+}
+
+export interface TikTokSceneCapability {
+  id: string;
+  label: string;
+  shortLabel: string;
+  description: string;
+  status: TikTokCapabilityStatus;
+  operationCount: number;
+  queryCount: number;
+  protectedCount: number;
+  scopeKeys: string[];
+  prompts: string[];
+  note?: string;
+  operations: TikTokOperationCapability[];
+}
+
+export interface TikTokCapabilitiesResponse {
+  source: string;
+  catalogAsOf: string;
+  shopRegion?: string;
+  totalOperations: number;
+  sellerOperations: number;
+  creatorOperations: number;
+  readyQueries: number;
+  protectedOperations: number;
+  scenes: TikTokSceneCapability[];
+  scopes: TikTokScopeCapability[];
+  excludedScopes: Array<{ key: string; label: string; reason: string }>;
+  warnings: string[];
+}
+
+// ─── Skill 管理系统 ────────────────────────────────────────────
+
+export interface SkillConfigField {
+  key: string;
+  label: string;
+  type: "text" | "password" | "url";
+  required: boolean;
+  placeholder?: string;
+}
+
+type SkillCategory = "collection" | "fulfillment" | "analytics" | "custom";
+
+export interface SkillDefinition {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  version: string;
+  category: SkillCategory;
+  configFields: SkillConfigField[];
+  builtin: boolean;
+  scenes: string[];
+}
+
+export interface SkillStatus {
+  id: string;
+  installed: boolean;
+  enabled: boolean;
+  configured: boolean;
+  config: Record<string, string>;
+  connectionState?: "connected" | "configured" | "not_configured";
+  configSource?: "oauth" | "skill" | "env" | "none";
+}
+
+export interface SkillsCatalogResponse {
+  skills: SkillDefinition[];
+  statuses: SkillStatus[];
+}
+
+// ─── 办公室实时状态（办公室页面消费的唯一数据契约）────────────
+
+export interface OfficeAgentStatus {
+  /** 对应 DigitalEmployee.id / 场景 AGENT_ROSTER.id */
+  id: AgentContext;
+  name: string;
+  /** 后端运行时状态：idle 空闲 / working 工作中 / waiting 等待用户确认 */
+  state: "idle" | "working" | "waiting";
+  currentTask?: string;
+  /** 员工就绪度（静态元数据） */
+  readiness: "ready" | "foundation" | "planned";
+}
+
+export interface OfficeStats {
+  /** 任务队列中正在执行的任务数 */
+  running: number;
+  /** 排队等待执行的任务数 */
+  queued: number;
+  /** 今日完成的业务任务数（队列任务 + 工作流） */
+  completedToday: number;
+  /** 等待人工确认的审批数（行动审批 + 工作流确认） */
+  pendingApprovals: number;
+  /** 当前正在工作的 Agent 数 */
+  activeAgents: number;
+  /** 就绪（ready）员工数 */
+  readyAgents: number;
+  /** 规划中（planned）员工数 */
+  plannedAgents: number;
+}
+
+export interface OfficeSnapshot {
+  agents: OfficeAgentStatus[];
+  stats: OfficeStats;
+  generatedAt: string;
+}
