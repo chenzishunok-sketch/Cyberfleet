@@ -33,7 +33,10 @@ app.listen(port, host, () => {
   console.log(`跨境电商多Agent协同系统 API listening on http://${host}:${port}`);
 });
 
-void Promise.all([
+// 数据库初始化单独成组：备份必须排在它们之后。
+// 备份以只读连接打开源库，若与建表/中断恢复的写入事务并发，只读连接会撞上
+// 正在写入的 WAL 而抛 "disk I/O error"，导致当日备份静默缺失。
+const databaseReady = Promise.all([
   (async () => {
     const recovery = actionPlanStore.recoverInterruptedPlans();
     if (recovery.expired || recovery.verificationPending) {
@@ -46,13 +49,18 @@ void Promise.all([
       console.log(`Recovered workflows: ${workflowRecovery.verificationPending} awaiting verification, ${workflowRecovery.failed} ready to retry`);
     }
   })(),
-  backupWorkflowDatabase().catch((error) => {
-    console.error(`Workflow database backup failed: ${error instanceof Error ? error.message : String(error)}`);
-  }),
   (async () => {
     ensureDefaultScheduleTasks();
     scheduler.start();
   })(),
+]);
+
+void databaseReady.then(() => backupWorkflowDatabase()).catch((error) => {
+  console.error(`Workflow database backup failed: ${error instanceof Error ? error.message : String(error)}`);
+});
+
+void Promise.all([
+  databaseReady,
   startKolBridge().then(() => {
     console.log(`KOL browser bridge listening on ws://127.0.0.1:${process.env.KOL_BRIDGE_PORT ?? 8794}`);
   }).catch((error) => {
