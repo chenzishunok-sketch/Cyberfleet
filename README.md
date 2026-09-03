@@ -30,7 +30,9 @@ cp .env.example .env
 npm run dev
 ```
 
-打开 [http://localhost:5180](http://localhost:5180)。API 服务运行在 `http://localhost:8793`；直接打开 `8793` 也会自动跳转到网页。
+打开 [http://localhost:5182](http://localhost:5182)。API 服务运行在 `http://localhost:8795`；直接打开 `8795` 也会自动跳转到网页。
+
+> 端口可在 `.env` 中调整：`PORT`（API，默认 8795）、`KOL_BRIDGE_PORT`（达人建联 WebSocket，默认 8796）、`npm run dev` 中 Vite 的前端端口固定为 5182。改完后用 `npm run kill` 清理旧进程。
 
 构建与测试：
 
@@ -66,7 +68,7 @@ TIKTOK_SHOP_AUTH_URL=https://services.tiktokshop.com/open/authorize?service_id=7
 在 TikTok Shop Partner Center 中，把重定向链接设置为：
 
 ```text
-http://localhost:8793/api/tiktok/callback
+http://localhost:8795/api/tiktok/callback
 ```
 
 然后打开应用的“设置 → 连接与权限”，点击“连接店铺”。授权完成后，后端会自动换取 access token、读取授权店铺并保存 `shop cipher`，不需要手工寻找这两个值。开发凭证保存在 `.env`，授权令牌保存在本地 `.data/tiktok-authorization.json`，这两个文件都不应提交到代码仓库。
