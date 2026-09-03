@@ -100,7 +100,8 @@ function extractSourceUrls(ctx: DagExecutionContext, nodeIds: string[]): string[
 registerExecutor("chuhaijiang_search", async (input, ctx) => {
   const keyword = str(pick(ctx, "keyword", []));
   if (!keyword) throw new Error("请提供搜索关键词。");
-  const limit = Number(pick(ctx, "limit", []) ?? 10);
+  // 出海匠 search 的 limit 硬上限为 10，超出时服务端仍返回 isError=false，只在正文里带 error
+  const limit = Math.min(10, Math.max(1, Math.trunc(Number(pick(ctx, "limit", []) ?? 10)) || 10));
   // 出海匠 search 必填 entity + country；默认搜美区爆品，允许入参覆盖
   const entity = str(pick(ctx, "entity", []) ?? input.entity ?? "products");
   const country = str(pick(ctx, "country", []) ?? input.country ?? "us");
@@ -115,12 +116,19 @@ registerExecutor("chuhaijiang_search", async (input, ctx) => {
 
   let items: unknown[] = [];
   try {
-    const parsed = JSON.parse(result.content);
+    const parsed = JSON.parse(result.content) as Record<string, unknown> | unknown[];
+    // 参数校验失败时出海匠返回 { error, invalid_param } 且 isError=false，必须显式上抛，
+    // 否则会被当成“无搜索结果”，工作流静默走空结果分支
+    const remoteError = Array.isArray(parsed) ? undefined : parsed?.error;
+    if (typeof remoteError === "string" && remoteError.trim()) {
+      throw new Error(`出海匠返回错误：${remoteError}`);
+    }
     const rawItems = Array.isArray(parsed)
       ? parsed
       : (parsed?.items ?? parsed?.data?.items ?? parsed?.data ?? []);
     items = Array.isArray(rawItems) ? rawItems : [];
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("出海匠返回错误")) throw error;
     items = [];
   }
   return {
