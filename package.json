@@ -11,6 +11,7 @@
     "ports": "for p in 5182 8795 8796; do pid=$(lsof -i :$p -sTCP:LISTEN -t 2>/dev/null | tr '\\n' ' '); echo \"端口 $p → ${pid:-空闲}\"; done",
     "build": "tsc -b && vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
+    "start:cloud": "npm run build && DEMO_MODE=true NODE_ENV=production HOST=0.0.0.0 tsx server/index.ts",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false",
     "feishu": "lark-cli",

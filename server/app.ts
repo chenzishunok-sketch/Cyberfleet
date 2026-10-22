@@ -1,4 +1,6 @@
 import express from "express";
+import fs from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 import type { ChatRequest, MessageArtifact, SkuPricingRecord } from "../shared/contracts.ts";
 import { AGENT_CONTEXTS, type AgentContext } from "../shared/digital-employees.ts";
@@ -273,6 +275,11 @@ export function createApp() {
   app.disable("x-powered-by");
   app.use(express.json({ limit: "20mb" }));
 
+  // 前端构建产物目录：存在时由 API 服务同端口托管（生产/云端单端口模式）
+  const webDistDir = process.env.WEB_DIST?.trim() || path.resolve(process.cwd(), "dist");
+  const distIndex = path.join(webDistDir, "index.html");
+  const webIndexFile = fs.existsSync(distIndex) ? distIndex : undefined;
+
   // health 端点短缓存：前端轮询频繁，连接状态无需实时计算（5s TTL）
   let healthCache: { at: number; payload: unknown } | undefined;
   const HEALTH_TTL_MS = 5000;
@@ -283,6 +290,11 @@ export function createApp() {
   });
 
   app.get("/", (_request, response) => {
+    // 有构建产物时直接返回应用首页，否则回退到跳转 Vite dev server（本地开发）
+    if (webIndexFile) {
+      response.sendFile(webIndexFile);
+      return;
+    }
     response.redirect(getFrontendUrl());
   });
 
@@ -1421,6 +1433,17 @@ export function createApp() {
     automation.enabled = !automation.enabled;
     response.json({ automation });
   });
+
+  // 生产单端口：若存在前端构建产物（npm run build 生成的 dist），由本服务直接托管，
+  // 不再依赖 Vite dev server。云托管/演示环境只需要暴露一个端口。
+  if (webIndexFile) {
+    app.use(express.static(webDistDir, { index: false, maxAge: "1h" }));
+    app.use((request, response, next) => {
+      if (request.method !== "GET" && request.method !== "HEAD") return next();
+      if (request.path === "/api" || request.path.startsWith("/api/")) return next();
+      response.sendFile(webIndexFile);
+    });
+  }
 
   app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
     console.error(error);

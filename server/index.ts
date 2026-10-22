@@ -25,7 +25,8 @@ if (networkProxy) console.log("System network proxy enabled for external APIs");
 bridgeTaskQueueToAgentBus();
 
 const port = Number(process.env.PORT ?? 8793);
-const host = process.env.HOST ?? "127.0.0.1";
+// 生产环境默认绑定 0.0.0.0（容器/云托管需要），本地开发仍只监听回环地址
+const host = process.env.HOST ?? (process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1");
 
 // 优先启动 HTTP 服务，恢复与备份任务并行异步执行，缩短就绪时间
 const app = createApp();

@@ -1,7 +1,21 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { backup, DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
+
+// node:sqlite 的 backup() 直到较新的 Node 版本才导出（22.13 及以下没有）。
+// 这里做能力探测，避免静态 import 在低版本 Node 上直接抛
+// "does not provide an export named 'backup'" 而让整个服务起不来。
+type NativeBackup = (source: DatabaseSync, destination: string) => Promise<unknown>;
+
+async function resolveNativeBackup(): Promise<NativeBackup | undefined> {
+  try {
+    const sqlite = (await import("node:sqlite")) as { backup?: NativeBackup };
+    return typeof sqlite.backup === "function" ? sqlite.backup : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function localDateKey(date: Date): string {
   const year = date.getFullYear();
@@ -41,13 +55,35 @@ export async function backupWorkflowDatabase(options: {
   const tempPath = `${targetPath}.tmp`;
   rmSync(stagingPath, { force: true });
   rmSync(tempPath, { force: true });
-  const database = new DatabaseSync(sourcePath, { readOnly: true });
-  try {
-    await backup(database, stagingPath);
+
+  const finish = (): string => {
     copyFileSync(stagingPath, tempPath);
     renameSync(tempPath, targetPath);
     chmodSync(targetPath, 0o600);
     return targetPath;
+  };
+
+  const nativeBackup = await resolveNativeBackup();
+  if (nativeBackup) {
+    const database = new DatabaseSync(sourcePath, { readOnly: true });
+    try {
+      await nativeBackup(database, stagingPath);
+      return finish();
+    } catch (error) {
+      rmSync(tempPath, { force: true });
+      throw error;
+    } finally {
+      database.close();
+      rmSync(stagingPath, { force: true });
+    }
+  }
+
+  // 低版本 Node 没有 backup()：用 VACUUM INTO 导出一致性快照。
+  // VACUUM 需要可写连接，因此这里不以 readOnly 打开。
+  const database = new DatabaseSync(sourcePath);
+  try {
+    database.exec(`VACUUM INTO '${stagingPath.replace(/'/g, "''")}'`);
+    return finish();
   } catch (error) {
     rmSync(tempPath, { force: true });
     throw error;
