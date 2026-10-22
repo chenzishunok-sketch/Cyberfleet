@@ -771,7 +771,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
 
   async verify({ platformDetailId, shopId, publishedAfter, workflowCreatedAt }) {
     try {
-      const response = await miaoshouGetPublishRecords(1, 50);
+      const response = await miaoshouGetPublishRecords(1, 20);
       const serialized = JSON.stringify(response.data ?? response);
       const matched = serialized.includes(platformDetailId) && serialized.includes(shopId);
       if (matched) {
@@ -783,13 +783,32 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     }
 
     // 发布记录权限未开通时，采集箱的状态分组仍可以提供明确进度。
+    // 妙手发布是异步的，刚提交时商品会先停留在「未发布」分组，落库需要几十秒到几分钟；
+    // 只查一次就判「等待核验」会造成大量误报，这里在窗口内轮询等它落到「已发布」。
+    const VERIFY_WAIT_TOTAL_MS = 90_000;
+    const VERIFY_WAIT_INTERVAL_MS = 12_000;
+    const verifyDeadline = Date.now() + VERIFY_WAIT_TOTAL_MS;
     await new Promise((resolve) => setTimeout(resolve, 1100));
-    const pendingResponse = await miaoshouGetTikTokCollectBoxList(1, 100, "notPublished");
-    if (includesCollectBoxItem(pendingResponse, platformDetailId)) {
-      return {
-        matched: false,
-        summary: "采集上架服务已接受发布请求，但该商品目前仍在“未发布”列表中，还没有上架到 TikTok。",
-      };
+    let sawPending = false;
+    while (Date.now() < verifyDeadline) {
+      const pendingResponse = await miaoshouGetTikTokCollectBoxList(1, 100, "notPublished");
+      if (!includesCollectBoxItem(pendingResponse, platformDetailId)) break;
+      sawPending = true;
+      await new Promise((resolve) => setTimeout(resolve, VERIFY_WAIT_INTERVAL_MS));
+    }
+    if (sawPending) {
+      // 等待期结束后仍停在「未发布」，或刚好挪出未发布分组，都再查一次已发布分组确认。
+      const publishedResponse = await miaoshouGetTikTokCollectBoxList(1, 100, "published");
+      if (includesCollectBoxItem(publishedResponse, platformDetailId)) {
+        const linked = await findRecentTikTokProduct(workflowCreatedAt ?? publishedAfter).catch(() => undefined);
+        return { matched: true, summary: linked ? `已经在采集上架服务“已发布”列表和 TikTok 店铺找到商品 ${linked.productId}。` : "已经在采集上架服务“已发布”列表中找到该商品。", ...linked };
+      }
+      if (Date.now() >= verifyDeadline) {
+        return {
+          matched: false,
+          summary: "采集上架服务已接受发布请求，但该商品发布后 90 秒内仍停在“未发布”列表，还没有上架到 TikTok。可稍后点击「重新核验发布结果」。",
+        };
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 1100));
     const publishedResponse = await miaoshouGetTikTokCollectBoxList(1, 100, "published");

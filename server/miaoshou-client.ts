@@ -474,11 +474,11 @@ export async function miaoshouClaimToShop(detailIds: number[], shopIds: number[]
   }, { retry: false });
 }
 
-/** 发布记录列表 */
+/** 发布记录列表（妙手限制 pageSize ≤ 20，超过会报「pageSize 不能大于20」） */
 export async function miaoshouGetPublishRecords(page = 1, pageSize = 20) {
   return miaoshouRequest("/open/v1/product/collect_box/tiktok/move_collect/search_move_collect_list", {
     pageNo: page,
-    pageSize,
+    pageSize: Math.min(Math.max(1, pageSize), 20),
   });
 }
 
