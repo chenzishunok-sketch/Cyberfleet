@@ -18,6 +18,12 @@ import type {
   TikTokCapabilitiesResponse,
   SkillsCatalogResponse,
   SkillStatus,
+  SkillConnectionTestResult,
+  TikTokBindingSummary,
+  TikTokConnectionStatus,
+  LlmProviderSummary,
+  LlmProvidersOverview,
+  LlmProviderTestResult,
   WorkflowListResponse,
   WorkflowHistoryItem,
   OfficeSnapshot,
@@ -25,20 +31,14 @@ import type {
 import type { ContentAsset, ContentOverview, ContentTask } from "../shared/content";
 import type { IntelligenceOverview, IntelligenceScope, KnowledgeCategory, KnowledgeEntry, KnowledgeMatch, PromptRule, WebSearchInput, WebSearchResponse } from "../shared/intelligence";
 
-export interface TikTokConnectionStatus {
-  status: "not_configured" | "ready_to_authorize" | "shop_selection_required" | "connected" | "expired";
-  connected: boolean;
-  shopName?: string;
-  region?: string;
-  expiresAt?: number;
-  shops?: Array<{ id: string; name: string; region: string }>;
-}
+export type { TikTokBindingSummary, TikTokConnectionStatus, LlmProviderSummary, LlmProvidersOverview, LlmProviderTestResult } from "../shared/contracts";
 
 export interface HealthResponse {
   ok: boolean;
   mode: "demo" | "connected" | "setup";
   connections: { llm: boolean; tiktok: boolean; miaoshou: boolean; tmapi: boolean; kolBridge: boolean };
   tiktok: TikTokConnectionStatus;
+  llm: { connected: boolean; source: "provider" | "env" | "missing"; name?: string; model?: string };
   miaoshou: { connected: boolean };
   tmapi: { connected: boolean };
 }
@@ -89,6 +89,7 @@ export const api = {
     const decoder = new TextDecoder();
     let buffer = "";
     let finalResponse: ChatResponse | undefined;
+    let streamError: string | undefined;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -99,17 +100,23 @@ export const api = {
         if (!line.startsWith("data: ")) continue;
         const event = JSON.parse(line.slice(6)) as ChatStreamEvent;
         if (event.type === "final") finalResponse = event.response;
+        else if (event.type === "error") streamError = event.message;
         else onEvent(event);
       }
     }
-    if (!finalResponse) throw new Error("流式响应意外结束。");
+    // 服务端中途失败会先推 {type:"error"} 再结束流：把真实原因透传给调用方
+    if (!finalResponse) throw new Error(streamError ?? "流式响应意外结束。");
     return finalResponse;
   },
   approve: (actionId: string) => request<ActionResponse>(`/api/actions/${actionId}/approve`, { method: "POST" }),
   reject: (actionId: string) => request<{ plan: { status: string } }>(`/api/actions/${actionId}/reject`, { method: "POST" }),
   toggleAutomation: (automationId: string) =>
     request<{ automation: DashboardSnapshot["automations"][number] }>(`/api/automations/${automationId}/toggle`, { method: "POST" }),
-  selectTikTokShop: (shopId: string) => request<{ tiktok: TikTokConnectionStatus }>("/api/tiktok/shop", { method: "POST", body: JSON.stringify({ shopId }) }),
+  selectTikTokShop: (shopId: string, grantId?: string) =>
+    request<{ tiktok: TikTokConnectionStatus }>("/api/tiktok/shop", { method: "POST", body: JSON.stringify(grantId ? { shopId, grantId } : { shopId }) }),
+  tiktokBindings: () => request<{ bindings: TikTokBindingSummary[]; tiktok: TikTokConnectionStatus }>("/api/tiktok/bindings"),
+  unbindTikTokBinding: (grantId: string) =>
+    request<{ ok: boolean; tiktok: TikTokConnectionStatus }>(`/api/tiktok/bindings/${encodeURIComponent(grantId)}`, { method: "DELETE" }),
   health: () => request<HealthResponse>("/api/health"),
   contentOverview: () => request<ContentOverview>("/api/content"),
   intelligenceOverview: () => request<IntelligenceOverview>("/api/intelligence"),
@@ -211,4 +218,25 @@ export const api = {
   disableSkill: (skillId: string) => request<SkillStatus>(`/api/skills/${skillId}/disable`, { method: "POST" }),
   updateSkillConfig: (skillId: string, config: Record<string, string>) =>
     request<SkillStatus>(`/api/skills/${skillId}/config`, { method: "PUT", body: JSON.stringify({ config }) }),
+  skillConnectionTest: (skillId: string) =>
+    request<SkillConnectionTestResult>(`/api/skills/${encodeURIComponent(skillId)}/test`, { method: "POST" }),
+  clearSkillConfig: (skillId: string) =>
+    request<{ ok: boolean; catalog: SkillsCatalogResponse }>(`/api/skills/${encodeURIComponent(skillId)}/config`, { method: "DELETE" }),
+
+  // 大模型供应商绑定
+  llmProviders: () => request<LlmProvidersOverview>("/api/llm/providers"),
+  addLlmProvider: (input: { name: string; baseUrl: string; apiKey: string; model: string; fastModel?: string }) =>
+    request<{ provider: LlmProviderSummary; overview: LlmProvidersOverview }>("/api/llm/providers", { method: "POST", body: JSON.stringify(input) }),
+  updateLlmProvider: (id: string, input: { name?: string; baseUrl?: string; apiKey?: string; model?: string; fastModel?: string }) =>
+    request<{ provider: LlmProviderSummary; overview: LlmProvidersOverview }>(`/api/llm/providers/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(input) }),
+  deleteLlmProvider: (id: string) =>
+    request<{ ok: boolean; overview: LlmProvidersOverview }>(`/api/llm/providers/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  activateLlmProvider: (id: string) =>
+    request<{ provider: LlmProviderSummary; overview: LlmProvidersOverview }>(`/api/llm/providers/${encodeURIComponent(id)}/activate`, { method: "POST" }),
+  importLlmEnvProvider: () =>
+    request<{ provider: LlmProviderSummary; overview: LlmProvidersOverview }>("/api/llm/providers/import-env", { method: "POST" }),
+  testLlmProvider: (input: { id?: string; baseUrl?: string; apiKey?: string; model?: string }) =>
+    request<LlmProviderTestResult>("/api/llm/providers/test", { method: "POST", body: JSON.stringify(input) }),
+  llmProviderModels: (input: { id?: string; baseUrl?: string; apiKey?: string }) =>
+    request<{ models: string[]; error?: string }>("/api/llm/providers/models", { method: "POST", body: JSON.stringify(input) }),
 };

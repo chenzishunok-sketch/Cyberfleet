@@ -3,6 +3,7 @@ import { extname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ContentAsset, ContentOverview, ContentTask } from "../shared/content.ts";
 import { generateContentText } from "./llm.ts";
+import { getLlmRuntimeConfig } from "./llm-providers.ts";
 import { createAgnesVideo, generateAgnesImage, getAgnesVideo, hasAgnesConfiguration } from "./agnes-client.ts";
 import { contentStore } from "./content-store.ts";
 
@@ -50,7 +51,7 @@ export async function createTextContent(input: CommonInput & { kind: "title" | "
     const content = await generateContentText(input);
     const asset = contentStore.saveAsset({
       id: randomUUID(), type: "text", title: task.title, prompt: input.prompt, project: input.project, sku: input.sku,
-      content, model: process.env.LLM_MODEL || "existing-llm", createdAt: new Date().toISOString(),
+      content, model: getLlmRuntimeConfig().model || "existing-llm", createdAt: new Date().toISOString(),
     });
     return { task: updateTask(task, { status: "completed", progress: 100, assetId: asset.id }), asset };
   } catch (error) {

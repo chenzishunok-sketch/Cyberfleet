@@ -12,6 +12,7 @@ import type {
   RunStep,
 } from "../shared/contracts.ts";
 import { dashboard, cloneDashboard } from "./data.ts";
+import { handleDumateChat, isDumateConfigured, shouldRouteToDumate } from "./dumate-client.ts";
 import { decideWithLlm, hasLlmConfiguration, reactLoop, extractMemories, reflectOnResult, summarizeWebResearch, type AgentDecision, type ToolExecutorFn } from "./llm.ts";
 import { loadMemory, formatMemoryForPrompt, addPreference, addInsight, recordOperation } from "./memory.ts";
 import { memoryLayer } from "./memory-layer.ts";
@@ -1879,6 +1880,17 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
       if (!responseMsg.followUps?.length) responseMsg.followUps = decisionFollowUps(fastReadDecision, request.message);
       void extractAndSaveMemory(request, responseMsg);
       return { message: responseMsg, runId: randomUUID() };
+    }
+  }
+
+  // ── 百度搭子（DuMate）对话路径 ──
+  // 开启且配置后，非业务数据类对话交给搭子（普通聊天、知识问答、运营建议）；
+  // 命中经营数据/写操作关键词的消息仍走原链路，保留真实数据查询与审批安全。
+  if (isDumateConfigured() && shouldRouteToDumate(request.message)) {
+    try {
+      return await handleDumateChat(request, emit);
+    } catch (error) {
+      console.warn("DuMate 对话失败，回落到原有链路：", error);
     }
   }
 

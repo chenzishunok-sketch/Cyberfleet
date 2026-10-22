@@ -1,52 +1,42 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
   ArrowRight,
-  BadgePercent,
-  BarChart3,
+  BarChartBig,
   Bot,
   Boxes,
   Check,
   CheckCircle2,
-  CircleDollarSign,
   Download,
-  ExternalLink,
   FileBarChart,
   FileText,
   Globe2,
-  KeyRound,
   LoaderCircle,
+  MessageSquare,
   MessageSquareText,
-  PackageCheck,
+  PackageSearch,
   Plus,
-  Puzzle,
+  Radar,
   RefreshCcw,
   Search,
-  Server,
-  ShieldCheck,
-  ShoppingBag,
   Store,
-  TrendingUp,
-  Truck,
-  Warehouse,
-  Workflow,
 } from "lucide-react";
 import type {
   Automation,
   DashboardSnapshot,
   SkillsCatalogResponse,
-  SkillDefinition,
-  SkillStatus,
-  TikTokCapabilitiesResponse,
-  TikTokCapabilityStatus,
-  TikTokOperationCapability,
-  TikTokSceneCapability,
+  TikTokBindingSummary,
+  LlmProviderSummary,
+  LlmProvidersOverview,
+  LlmProviderTestResult,
+  SkillConnectionTestResult,
 } from "../../shared/contracts";
 import { WorkflowCenter } from "./WorkflowCenter";
+import { api } from "../api";
 import type { TikTokConnectionStatus } from "../api";
+import { regionLabel } from "../region-labels";
 import type { ViewId } from "./Sidebar";
-import type { LucideIcon } from "lucide-react";
 
 interface PageProps {
   dashboard: DashboardSnapshot;
@@ -54,15 +44,16 @@ interface PageProps {
   tiktokConnection: TikTokConnectionStatus;
   onToggleAutomation: (id: string) => void;
   onOpenChat: (prompt?: string) => void;
-  onSelectTikTokShop: (shopId: string) => Promise<void>;
-  capabilities?: TikTokCapabilitiesResponse;
-  capabilitiesError?: string;
-  selectedSceneId?: string;
-  onSceneSelect: (sceneId: string) => void;
+  onSelectTikTokShop: (shopId: string, grantId?: string) => Promise<void>;
+  onBindNewShop: () => void;
+  onUnbindBinding: (grantId: string) => Promise<void>;
+  llmOverview?: LlmProvidersOverview;
+  onLlmChanged: () => Promise<void>;
+  onAddLlmProvider: () => void;
+  onEditLlmProvider: (provider: LlmProviderSummary) => void;
   skillsCatalog?: SkillsCatalogResponse;
-  skillsError?: string;
-  onRetrySkills: () => void;
-  onOpenSkillManager: () => void;
+  onSkillsChanged: () => Promise<void>;
+  onOpenConnectorWizard: (skillId: string) => void;
   onOpenConversationManager: () => void;
 }
 
@@ -152,285 +143,500 @@ function ActivityPage({ dashboard }: PageProps) {
   );
 }
 
-const skillIcons: Record<string, LucideIcon> = {
-  "tiktok-shop": ShoppingBag,
-  miaoshou: Boxes,
+const BINDING_STATUS_LABELS: Record<TikTokBindingSummary["status"], string> = {
+  connected: "已连接",
+  expired: "授权过期",
+  invalid: "需重新授权",
 };
 
-const sceneIcons: Record<string, LucideIcon> = {
-  market: TrendingUp,
-  analytics: BarChart3,
-  catalog: ShoppingBag,
-  global: Globe2,
-  orders: PackageCheck,
-  fulfillment: Truck,
-  logistics: Warehouse,
-  aftersales: RefreshCcw,
-  finance: CircleDollarSign,
-  promotions: BadgePercent,
-  shop: Store,
-};
-
-const statusLabels: Record<TikTokCapabilityStatus, { label: string; description: string }> = {
-  ready: { label: "可直接查询", description: "当前卖家令牌可直接调用" },
-  confirmation_required: { label: "执行前确认", description: "涉及店铺变更，提交前必须人工确认" },
-  reauthorization_required: { label: "需重新授权", description: "控制台已开通，但当前令牌尚未包含该权限" },
-  creator_authorization_required: { label: "需达人授权", description: "该接口需要 creator access token，卖家令牌不能代替" },
-  eligibility_check_required: { label: "需资格校验", description: "调用前需确认卖家类型、市场或全球商品资格" },
-  region_unavailable: { label: "当前地区不可用", description: "该接口不支持当前店铺所在地区" },
-};
-
-function CapabilityStatus({ status, scope = false }: { status: TikTokCapabilityStatus; scope?: boolean }) {
-  const meta = statusLabels[status];
-  const label = scope && status === "ready" ? "令牌已授权" : meta.label;
-  return <span className={`capability-status capability-status--${status}`} title={meta.description}>{status === "ready" ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}{label}</span>;
+function bindingExpiryText(expiresAt: number | undefined): string {
+  if (!expiresAt) return "";
+  const days = Math.ceil((expiresAt * 1000 - Date.now()) / 86400000);
+  if (days <= 0) return "令牌已过期，使用时会自动尝试刷新";
+  return `令牌剩余约 ${days} 天有效期`;
 }
 
-function operationType(operation: TikTokOperationCapability): string {
-  if (operation.effect === "query") return "查询";
-  if (operation.effect === "task") return "异步任务";
-  if (operation.effect === "destructive") return "高风险操作";
-  return "写操作";
-}
-
-function CapabilitiesPage({ capabilities, capabilitiesError, selectedSceneId, onSceneSelect, onOpenChat }: PageProps) {
-  const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "protected" | "limited">("all");
-  const selectedScene = useMemo<TikTokSceneCapability | undefined>(() => {
-    if (!capabilities) return undefined;
-    return capabilities.scenes.find((scene) => scene.id === selectedSceneId) ?? capabilities.scenes[0];
-  }, [capabilities, selectedSceneId]);
-  const sceneScopes = useMemo(() => {
-    if (!capabilities || !selectedScene) return [];
-    return capabilities.scopes.filter((scope) => selectedScene.scopeKeys.includes(scope.key));
-  }, [capabilities, selectedScene]);
-  const operations = useMemo(() => {
-    if (!selectedScene) return [];
-    const needle = query.trim().toLowerCase();
-    return selectedScene.operations.filter((operation) => {
-      const matchesQuery = !needle || `${operation.title} ${operation.path} ${operation.scopeKeys.join(" ")}`.toLowerCase().includes(needle);
-      const matchesStatus = statusFilter === "all"
-        || (statusFilter === "ready" && operation.status === "ready")
-        || (statusFilter === "protected" && operation.status === "confirmation_required")
-        || (statusFilter === "limited" && operation.status !== "ready" && operation.status !== "confirmation_required");
-      return matchesQuery && matchesStatus;
-    });
-  }, [query, selectedScene, statusFilter]);
-
-  useEffect(() => {
-    setQuery("");
-    setStatusFilter("all");
-  }, [selectedSceneId]);
-
-  if (capabilitiesError) {
-    return (
-      <div className="page-content">
-        <PageHeader eyebrow="API CAPABILITIES" title="API 能力" description="店铺数据仍可使用，但能力目录暂时没有加载成功。" />
-        <div className="page-empty"><AlertTriangle size={25} /><h2>无法读取能力目录</h2><p>{capabilitiesError}</p></div>
-      </div>
-    );
-  }
-
-  if (!capabilities || !selectedScene) {
-    return (
-      <div className="page-content">
-        <PageHeader eyebrow="API CAPABILITIES" title="API 能力" description="正在核对当前令牌、店铺地区和官方接口目录。" />
-        <div className="page-empty"><LoaderCircle size={25} className="spin" /><h2>正在读取已开通场景</h2></div>
-      </div>
-    );
-  }
-
+function TikTokBindingCard({
+  binding,
+  selectingShopId,
+  onSelectShop,
+  onReauthorize,
+  onUnbind,
+}: {
+  binding: TikTokBindingSummary;
+  selectingShopId?: string;
+  onSelectShop: (shopId: string, grantId?: string) => Promise<void>;
+  onReauthorize: () => void;
+  onUnbind: () => void;
+}) {
+  const [confirmingUnbind, setConfirmingUnbind] = useState(false);
+  const isCurrent = binding.selectedShopId !== undefined;
   return (
-    <div className="page-content capabilities-page">
-      <PageHeader
-        eyebrow="TIKTOK SHOP API"
-        title={selectedScene.label}
-        description={selectedScene.description}
-        action={<button className="primary-button" onClick={() => onOpenChat(selectedScene.prompts[0])}><MessageSquareText size={16} />在对话中使用</button>}
-      />
-
-      <div className="capability-scene-tabs" aria-label="切换 API 场景">
-        {capabilities.scenes.map((scene) => <button key={scene.id} className={scene.id === selectedScene.id ? "selected" : ""} onClick={() => onSceneSelect(scene.id)}>{scene.shortLabel}</button>)}
-      </div>
-
-      <div className="summary-band capability-summary">
-        <div><span>官方接口目录</span><strong>{capabilities.totalOperations}</strong><small>{capabilities.sellerOperations} 个卖家接口</small></div>
-        <div><span>当前场景接口</span><strong>{selectedScene.operationCount}</strong><small>{sceneScopes.length} 项权限范围</small></div>
-        <div><span>只读查询</span><strong>{selectedScene.queryCount}</strong><small>符合条件时直接读取</small></div>
-        <div><span>受保护操作</span><strong>{selectedScene.protectedCount}</strong><small>提交前人工确认</small></div>
-      </div>
-
-      {(selectedScene.note || sceneScopes.some((scope) => scope.note)) && (
-        <div className="capability-notice"><KeyRound size={17} /><div><strong>使用条件</strong><p>{selectedScene.note ?? sceneScopes.find((scope) => scope.note)?.note}</p></div></div>
-      )}
-
-      <section className="capability-section">
-        <div className="section-heading"><div><h2>常用指令</h2><span>缺少订单号等必要信息时会先向你确认</span></div></div>
-        <div className="scene-prompt-grid">
-          {selectedScene.prompts.map((prompt) => <button key={prompt} onClick={() => onOpenChat(prompt)}><span>{prompt}</span><ArrowRight size={15} /></button>)}
+    <div className="binding-card">
+      <div className="binding-card-header">
+        <span className="connection-logo connection-logo--shop"><Store size={19} /></span>
+        <div className="binding-card-title">
+          <strong>{binding.sellerName || "TikTok 卖家账号"}{isCurrent && <span className="binding-current-badge">当前</span>}</strong>
+          <span>{binding.sellerRegion ? regionLabel(binding.sellerRegion) : "多区域卖家"} · {binding.shops.length} 个店铺{binding.expiresAt ? ` · ${bindingExpiryText(binding.expiresAt)}` : ""}</span>
         </div>
-      </section>
-
-      <section className="capability-section">
-        <div className="section-heading"><div><h2>权限范围</h2><span>{sceneScopes.length} 项</span></div></div>
-        <div className="scope-list">
-          {sceneScopes.map((scope) => (
-            <div className="scope-row" key={scope.key}>
-              <div><strong>{scope.label}</strong><code>{scope.key}</code>{scope.note && <small>{scope.note}</small>}</div>
-              <span className="scope-operation-count">{scope.operationCount} 个接口</span>
-              <CapabilityStatus status={scope.status} scope />
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="capability-section">
-        <div className="section-heading"><div><h2>官方接口</h2><span>{operations.length} / {selectedScene.operations.length}</span></div></div>
-        <div className="capability-toolbar">
-          <div className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索接口名称、路径或权限" aria-label="搜索 API 接口" /></div>
-          <div className="capability-filter" aria-label="筛选接口状态">
-            {(["all", "ready", "protected", "limited"] as const).map((filter) => (
-              <button key={filter} className={statusFilter === filter ? "selected" : ""} onClick={() => setStatusFilter(filter)}>{filter === "all" ? "全部" : filter === "ready" ? "可查询" : filter === "protected" ? "需确认" : "有条件"}</button>
-            ))}
+        <span className={`binding-status binding-status--${binding.status}`}><i />{BINDING_STATUS_LABELS[binding.status]}</span>
+      </div>
+      {binding.status === "invalid" && <p className="binding-warning"><AlertTriangle size={13} />该账号的授权令牌已完全过期，请重新授权后再使用。</p>}
+      <div className="binding-shop-list">
+        {binding.shops.map((shop) => (
+          <div key={shop.id} className="binding-shop-row">
+            <Store size={14} />
+            <div className="binding-shop-name"><strong>{shop.name}</strong><small>{regionLabel(shop.region)}</small></div>
+            {binding.selectedShopId === shop.id ? (
+              <span className="binding-current-chip"><Check size={12} />当前店铺</span>
+            ) : (
+              <button className="secondary-button connection-button" disabled={selectingShopId === shop.id} onClick={() => void onSelectShop(shop.id, binding.grantId)}>
+                {selectingShopId === shop.id ? <LoaderCircle size={14} className="spin" /> : null}
+                {selectingShopId === shop.id ? "切换中" : "设为当前"}
+              </button>
+            )}
           </div>
-        </div>
-        <div className="operation-list">
-          <div className="operation-row operation-row--header"><span>接口</span><span>类型</span><span>状态</span><span>文档</span></div>
-          {operations.map((operation) => (
-            <div className="operation-row" key={operation.id}>
-              <div className="operation-main"><div><span className={`method-chip method-chip--${operation.method.toLowerCase()}`}>{operation.method}</span><strong>{operation.title}</strong></div><code>{operation.path}</code><small>{operation.scopeKeys.join(" · ")}</small></div>
-              <span className={`operation-effect operation-effect--${operation.effect}`}>{operationType(operation)}</span>
-              <CapabilityStatus status={operation.status} />
-              <a className="operation-doc-link" href={operation.officialUrl} target="_blank" rel="noreferrer" aria-label={`打开 ${operation.title} 官方文档`} title="打开官方文档"><ExternalLink size={16} /></a>
-            </div>
-          ))}
-          {operations.length === 0 && <div className="operation-empty">没有符合当前筛选条件的接口。</div>}
-        </div>
-      </section>
-
-      <div className="capability-catalog-footnote">
-        <span>目录来源：{capabilities.source} · 更新于 {capabilities.catalogAsOf}</span>
-        <span>{capabilities.excludedScopes.length} 项审核中权限未接入：{capabilities.excludedScopes.map((scope) => scope.label).join("、")}</span>
+        ))}
+      </div>
+      <div className="binding-card-actions">
+        <button className="secondary-button connection-button" onClick={onReauthorize}><RefreshCcw size={14} />重新授权</button>
+        {confirmingUnbind ? (
+          <div className="binding-unbind-confirm">
+            <span><AlertTriangle size={13} />解绑后本地授权立即删除，平台侧授权可在 TikTok 卖家中心撤回。</span>
+            <button className="secondary-button connection-button binding-unbind-button" onClick={() => { setConfirmingUnbind(false); onUnbind(); }}>确认解绑</button>
+            <button className="secondary-button connection-button" onClick={() => setConfirmingUnbind(false)}>取消</button>
+          </div>
+        ) : (
+          <button className="secondary-button connection-button binding-unbind-button" onClick={() => setConfirmingUnbind(true)}>解绑</button>
+        )}
       </div>
     </div>
+  );
+}
+
+function TikTokBindingsSection({
+  dashboard,
+  tiktokConnection,
+  selectingShopId,
+  onSelectTikTokShop,
+  onBindNewShop,
+  onUnbindBinding,
+}: {
+  dashboard: DashboardSnapshot;
+  tiktokConnection: TikTokConnectionStatus;
+  selectingShopId?: string;
+  onSelectTikTokShop: (shopId: string, grantId?: string) => Promise<void>;
+  onBindNewShop: () => void;
+  onUnbindBinding: (grantId: string) => Promise<void>;
+}) {
+  const bindings = tiktokConnection.bindings ?? [];
+  const demo = dashboard.dataSource === "demo";
+  return (
+    <section className="settings-section">
+      <div className="settings-heading">
+        <h2>TikTok Shop 店铺绑定</h2>
+        <p>支持绑定多个卖家账号与多国店铺，所有店铺统一管理，随时切换当前操作店铺。</p>
+      </div>
+      <div className="binding-list">
+        {bindings.map((binding) => (
+          <TikTokBindingCard
+            key={binding.grantId}
+            binding={binding}
+            selectingShopId={selectingShopId}
+            onSelectShop={onSelectTikTokShop}
+            onReauthorize={() => window.location.assign("/api/tiktok/authorize")}
+            onUnbind={() => void onUnbindBinding(binding.grantId)}
+          />
+        ))}
+        {bindings.length === 0 && (
+          <div className="binding-empty">
+            <Store size={22} />
+            <div>
+              <strong>还没有绑定 TikTok Shop 店铺</strong>
+              <span>{demo ? "演示模式下页面使用内置示例数据。" : "按向导准备应用凭证并完成授权，即可在对话中查询和操作店铺。"}</span>
+            </div>
+            <button className="primary-button" onClick={onBindNewShop}><Plus size={15} />绑定新店铺</button>
+          </div>
+        )}
+        {bindings.length > 0 && (
+          <button className="binding-add" onClick={onBindNewShop}><Plus size={15} />绑定新店铺 / 新卖家账号</button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function LlmProviderCard({
+  provider,
+  isActive,
+  connected,
+  onChanged,
+  onEdit,
+}: {
+  provider: LlmProviderSummary;
+  isActive: boolean;
+  connected: boolean;
+  onChanged: () => Promise<void>;
+  onEdit: (provider: LlmProviderSummary) => void;
+}) {
+  const [testing, setTesting] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [testResult, setTestResult] = useState<LlmProviderTestResult>();
+  const host = (() => { try { return new URL(provider.baseUrl).host; } catch { return provider.baseUrl; } })();
+
+  const runTest = async () => {
+    if (testing) return;
+    setTesting(true);
+    setTestResult(undefined);
+    try {
+      // 只带 id：服务端复用已保存的完整密钥
+      setTestResult(await api.testLlmProvider({ id: provider.id }));
+    } catch (error) {
+      setTestResult({ ok: false, latencyMs: 0, error: error instanceof Error ? error.message : "测试失败。" });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const activate = async () => {
+    if (switching) return;
+    setSwitching(true);
+    try {
+      await api.activateLlmProvider(provider.id);
+      await onChanged();
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  const remove = async () => {
+    await api.deleteLlmProvider(provider.id);
+    await onChanged();
+  };
+
+  return (
+    <div className="binding-card">
+      <div className="binding-card-header">
+        <span className="connection-logo connection-logo--llm"><Bot size={19} /></span>
+        <div className="binding-card-title">
+          <strong>{provider.name}{isActive && <span className="binding-current-badge">当前使用</span>}</strong>
+          <span>{host} · {provider.model}{provider.fastModel ? ` · 快速模型 ${provider.fastModel}` : ""} · Key {shortMask(provider.apiKeyMasked)}</span>
+        </div>
+        <span className={`binding-status ${isActive ? (connected ? "binding-status--connected" : "binding-status--expired") : ""}`}><i />{isActive ? (connected ? "已连接" : "未生效") : "未启用"}</span>
+      </div>
+      {testResult && (
+        <p className={`llm-test-line ${testResult.ok ? "llm-test-line--ok" : "llm-test-line--fail"}`}>
+          {testResult.ok
+            ? <><CheckCircle2 size={13} />测试通过 · {testResult.latencyMs} ms{testResult.reply ? ` · ${testResult.reply}` : ""}</>
+            : <><AlertTriangle size={13} />测试失败：{testResult.error}</>}
+        </p>
+      )}
+      <div className="binding-card-actions">
+        {isActive ? (
+          <span className="binding-current-chip"><Check size={12} />使用中</span>
+        ) : (
+          <button className="secondary-button connection-button" disabled={switching} onClick={() => void activate()}>
+            {switching ? <LoaderCircle size={14} className="spin" /> : null}
+            {switching ? "切换中" : "设为当前"}
+          </button>
+        )}
+        <button className="secondary-button connection-button" disabled={testing} onClick={() => void runTest()}>
+          {testing ? <LoaderCircle size={14} className="spin" /> : <RefreshCcw size={14} />}{testing ? "测试中" : "测试"}
+        </button>
+        <button className="secondary-button connection-button" onClick={() => onEdit(provider)}>编辑</button>
+        {confirmingDelete ? (
+          <div className="binding-unbind-confirm">
+            <span><AlertTriangle size={13} />解绑后对话将回落到 .env 配置或规则路由。</span>
+            <button className="secondary-button connection-button binding-unbind-button" onClick={() => { setConfirmingDelete(false); void remove(); }}>确认解绑</button>
+            <button className="secondary-button connection-button" onClick={() => setConfirmingDelete(false)}>取消</button>
+          </div>
+        ) : (
+          <button className="secondary-button connection-button binding-unbind-button" onClick={() => setConfirmingDelete(true)}>解绑</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LlmProvidersSection({
+  overview,
+  onChanged,
+  onAdd,
+  onEdit,
+}: {
+  overview?: LlmProvidersOverview;
+  onChanged: () => Promise<void>;
+  onAdd: () => void;
+  onEdit: (provider: LlmProviderSummary) => void;
+}) {
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string>();
+
+  const importEnv = async () => {
+    if (importing) return;
+    setImporting(true);
+    setImportError(undefined);
+    try {
+      await api.importLlmEnvProvider();
+      await onChanged();
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "导入 .env 配置失败。");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const envHost = (() => { try { return overview?.baseUrl ? new URL(overview.baseUrl).host : ""; } catch { return overview?.baseUrl ?? ""; } })();
+
+  return (
+    <section className="settings-section">
+      <div className="settings-heading">
+        <h2>大模型连接</h2>
+        <p>{overview
+          ? overview.connected
+            ? `当前使用：${overview.name ?? "模型服务"} · ${overview.model ?? ""}。可绑定多个服务随时切换。`
+            : overview.source === "env"
+              ? "当前使用 .env 中的模型配置，可在下方绑定更多服务并切换。"
+              : "尚未绑定模型服务，对话将使用本地规则路由。按向导绑定后即可使用 AI 能力。"
+          : "正在读取模型服务…"}</p>
+      </div>
+      <div className="binding-list">
+        {overview?.source === "env" && overview.connected && (
+          <div className="binding-card">
+            <div className="binding-card-header">
+              <span className="connection-logo connection-logo--llm"><Bot size={19} /></span>
+              <div className="binding-card-title">
+                <strong>.env 配置<span className="binding-current-badge">当前使用</span></strong>
+                <span>{envHost ? `${envHost} · ` : ""}{overview.model ?? ""}{overview.fastModel ? ` · 快速模型 ${overview.fastModel}` : ""}</span>
+              </div>
+              <span className="binding-status binding-status--connected"><i />已连接</span>
+            </div>
+            {importError && <p className="llm-test-line llm-test-line--fail"><AlertTriangle size={13} />{importError}</p>}
+            <div className="binding-card-actions">
+              <span className="binding-current-chip"><Check size={12} />使用中</span>
+              <button className="secondary-button connection-button" disabled={importing} onClick={() => void importEnv()}>
+                {importing ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}{importing ? "导入中" : "导入为可管理服务"}
+              </button>
+            </div>
+            <p className="wizard-note" style={{ margin: 0 }}>此服务来自项目 .env 文件，暂不能在这里编辑；导入后会成为一张普通服务卡片，可改名、换 Key、随时切换。</p>
+          </div>
+        )}
+        {overview?.providers.map((provider) => (
+          <LlmProviderCard
+            key={provider.id}
+            provider={provider}
+            isActive={overview.activeId === provider.id}
+            connected={overview.connected}
+            onChanged={onChanged}
+            onEdit={onEdit}
+          />
+        ))}
+        {overview && (
+          <button className="binding-add" onClick={onAdd}><Plus size={15} />添加模型服务</button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+const CONNECTOR_ICONS: Record<string, typeof Boxes> = {
+  miaoshou: Boxes,
+  "tmapi-1688": PackageSearch,
+  chuhaijiang: Radar,
+  "web-search": Globe2,
+  feishu: MessageSquare,
+  fastmoss: BarChartBig,
+};
+
+const CONNECTOR_IDS = Object.keys(CONNECTOR_ICONS);
+
+function shortMask(masked: string): string {
+  return masked.length > 20 ? `${masked.slice(0, 10)}…${masked.slice(-6)}` : masked;
+}
+
+function BusinessConnectorCard({
+  skill,
+  status,
+  onChanged,
+  onConfigure,
+}: {
+  skill: { id: string; name: string; description: string };
+  status: { configSource?: string; connectionState?: string; config: Record<string, string> };
+  onChanged: () => Promise<void>;
+  onConfigure: (skillId: string) => void;
+}) {
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<SkillConnectionTestResult>();
+  const [confirmingUnbind, setConfirmingUnbind] = useState(false);
+  const Icon = CONNECTOR_ICONS[skill.id] ?? Boxes;
+  const boundViaUi = status.configSource === "skill";
+  const fromEnv = status.configSource === "env";
+  const secretField = skill.id === "feishu" ? "appSecret" : skill.id === "tmapi-1688" ? "apiToken" : "apiKey";
+  const secretMasked = status.config[secretField] ?? status.config.appSecret ?? "";
+  const urlField = status.config.baseUrl ?? status.config.mcpUrl;
+  const host = (() => { try { return urlField ? new URL(urlField).host : ""; } catch { return urlField ?? ""; } })();
+
+  const runTest = async () => {
+    if (testing) return;
+    setTesting(true);
+    setTestResult(undefined);
+    try {
+      setTestResult(await api.skillConnectionTest(skill.id));
+    } catch (error) {
+      setTestResult({ ok: false, latencyMs: 0, error: error instanceof Error ? error.message : "测试失败。" });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const unbind = async () => {
+    await api.clearSkillConfig(skill.id);
+    await onChanged();
+  };
+
+  return (
+    <div className="binding-card">
+      <div className="binding-card-header">
+        <span className="connection-logo connection-logo--llm"><Icon size={19} /></span>
+        <div className="binding-card-title">
+          <strong>{skill.name}{boundViaUi && <span className="binding-current-badge">已绑定</span>}</strong>
+          <span>{skill.description}</span>
+          {(host || secretMasked) && <span>{host}{host && secretMasked ? " · " : ""}{secretMasked ? shortMask(secretMasked) : ""}</span>}
+        </div>
+        <span className={`binding-status ${boundViaUi ? "binding-status--connected" : fromEnv ? "binding-status--expired" : ""}`}>
+          <i />{boundViaUi ? "已绑定" : fromEnv ? ".env 配置" : "未绑定"}
+        </span>
+      </div>
+      {fromEnv && <p className="binding-warning" style={{ background: "rgba(183, 93, 0, 0.08)", color: "var(--amber)" }}><AlertTriangle size={13} />当前生效的是 .env 配置；在向导中保存后改为界面管理。</p>}
+      {testResult && (
+        <p className={`llm-test-line ${testResult.ok ? "llm-test-line--ok" : "llm-test-line--fail"}`}>
+          {testResult.ok
+            ? <><CheckCircle2 size={13} />测试通过 · {testResult.latencyMs} ms{testResult.detail ? ` · ${testResult.detail}` : ""}</>
+            : <><AlertTriangle size={13} />测试失败：{testResult.error}</>}
+        </p>
+      )}
+      <div className="binding-card-actions">
+        <button className="secondary-button connection-button" disabled={testing} onClick={() => void runTest()}>
+          {testing ? <LoaderCircle size={14} className="spin" /> : <RefreshCcw size={14} />}{testing ? "测试中" : "测试"}
+        </button>
+        <button className="secondary-button connection-button" onClick={() => onConfigure(skill.id)}>{boundViaUi ? "换绑" : "配置"}</button>
+        {boundViaUi && (confirmingUnbind ? (
+          <div className="binding-unbind-confirm">
+            <span><AlertTriangle size={13} />解绑后回落到 .env 配置（如 .env 也没有则该连接不可用）。</span>
+            <button className="secondary-button connection-button binding-unbind-button" onClick={() => { setConfirmingUnbind(false); void unbind(); }}>确认解绑</button>
+            <button className="secondary-button connection-button" onClick={() => setConfirmingUnbind(false)}>取消</button>
+          </div>
+        ) : (
+          <button className="secondary-button connection-button binding-unbind-button" onClick={() => setConfirmingUnbind(true)}>解绑</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BusinessConnectorsSection({
+  catalog,
+  onChanged,
+  onConfigure,
+}: {
+  catalog?: SkillsCatalogResponse;
+  onChanged: () => Promise<void>;
+  onConfigure: (skillId: string) => void;
+}) {
+  const statuses = catalog?.statuses ?? [];
+  const connectors = (catalog?.skills ?? [])
+    .filter((skill) => CONNECTOR_IDS.includes(skill.id))
+    .map((skill) => ({ skill, status: statuses.find((item) => item.id === skill.id) }))
+    .filter((item): item is { skill: typeof item.skill; status: NonNullable<typeof item.status> } => Boolean(item.status));
+  const boundCount = connectors.filter((item) => item.status.configSource === "skill").length;
+
+  return (
+    <section className="settings-section">
+      <div className="settings-heading">
+        <h2>业务接口连接</h2>
+        <p>{catalog
+          ? `${boundCount} 个接口已通过界面绑定，全部接口保存后立即参与采集、上架、搜索、选品与通知等业务链路。`
+          : "正在读取接口目录…"}</p>
+      </div>
+      <div className="binding-list">
+        {connectors.map(({ skill, status }) => (
+          <BusinessConnectorCard
+            key={skill.id}
+            skill={skill}
+            status={status}
+            onChanged={onChanged}
+            onConfigure={onConfigure}
+          />
+        ))}
+      </div>
+    </section>
   );
 }
 
 function SettingsPage({
   dashboard,
-  connections,
   tiktokConnection,
   onSelectTikTokShop,
-  capabilities,
-  capabilitiesError,
-  onSceneSelect,
+  onBindNewShop,
+  onUnbindBinding,
+  llmOverview,
+  onLlmChanged,
+  onAddLlmProvider,
+  onEditLlmProvider,
   skillsCatalog,
-  skillsError,
-  onRetrySkills,
-  onOpenSkillManager,
+  onSkillsChanged,
+  onOpenConnectorWizard,
   onOpenConversationManager,
 }: PageProps) {
-  const [selectedShopId, setSelectedShopId] = useState(tiktokConnection.shops?.[0]?.id ?? "");
-  const [selectingShop, setSelectingShop] = useState(false);
-  const isLiveTikTok = dashboard.dataSource === "tiktok";
-  const tiktokLabel = dashboard.dataSource === "demo"
-    ? "演示模式"
-    : isLiveTikTok
-      ? "实时数据"
-    : tiktokConnection.status === "expired"
-      ? "授权已过期"
-      : tiktokConnection.status === "shop_selection_required"
-        ? "请选择店铺"
-      : tiktokConnection.status === "ready_to_authorize"
-        ? "等待授权"
-        : "尚未配置";
-  const tiktokDetail = dashboard.dataSource === "demo"
-    ? `${dashboard.store.name} · 演示数据`
-    : tiktokConnection.shopName
-      ? `${tiktokConnection.shopName}${tiktokConnection.region ? ` · ${tiktokConnection.region}` : ""}`
-      : dashboard.store.name;
-  const confirmShop = async () => {
-    if (!selectedShopId || selectingShop) return;
-    setSelectingShop(true);
+  const [selectingShopId, setSelectingShopId] = useState<string>();
+  const selectShop = async (shopId: string, grantId?: string) => {
+    setSelectingShopId(shopId);
     try {
-      await onSelectTikTokShop(selectedShopId);
+      await onSelectTikTokShop(shopId, grantId);
     } finally {
-      setSelectingShop(false);
+      setSelectingShopId(undefined);
     }
   };
 
   return (
     <div className="page-content settings-page">
-      <PageHeader eyebrow="SETTINGS" title="连接与权限" description="店铺连接、已开通场景、Skill 市场和操作策略均由服务端管理。" />
-      <section className="settings-section"><div className="settings-heading"><h2>聊天记录</h2><p>管理左侧“最近”中的全部对话，也可以整理到不同项目中。</p></div><div className="connection-list">
-        <div className="connection-item"><span className="connection-logo connection-logo--llm"><MessageSquareText size={21} /></span><div><strong>最近聊天</strong><span>搜索、重命名、归类或删除聊天记录</span></div><button className="secondary-button connection-button" onClick={onOpenConversationManager}>管理聊天<ArrowRight size={15} /></button></div>
-      </div></section>
-      <section className="settings-section"><div className="settings-heading"><h2>API 能力与连接</h2><p>在这里统一查看接口连接和已开通能力，凭证不会发送到浏览器。</p></div><div className="connection-list">
-        <div className="connection-item"><span className="connection-logo connection-logo--shop"><Store size={21} /></span><div><strong>TikTok Shop API</strong><span>{tiktokDetail}</span></div><div className="connection-actions"><span className={`connection-status ${!isLiveTikTok ? "connection-status--demo" : ""}`}><i />{tiktokLabel}</span>{tiktokConnection.status === "shop_selection_required" && <div className="shop-picker"><select aria-label="选择 TikTok Shop 店铺" value={selectedShopId} disabled={selectingShop} onChange={(event) => setSelectedShopId(event.target.value)}>{tiktokConnection.shops?.map((shop) => <option key={shop.id} value={shop.id}>{shop.name} · {shop.region}</option>)}</select><button className="secondary-button connection-button" disabled={!selectedShopId || selectingShop} onClick={() => void confirmShop()}>{selectingShop ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}{selectingShop ? "正在切换" : "确认店铺"}</button></div>}{!connections.tiktok && tiktokConnection.status !== "not_configured" && tiktokConnection.status !== "shop_selection_required" && dashboard.dataSource !== "demo" && <button className="secondary-button connection-button" onClick={() => window.location.assign("/api/tiktok/authorize")}>{tiktokConnection.status === "expired" ? "重新授权" : "连接店铺"}<ArrowRight size={15} /></button>}</div></div>
-        <div className="connection-item"><span className="connection-logo connection-logo--llm"><Bot size={21} /></span><div><strong>LLM API</strong><span>OpenAI-compatible endpoint</span></div><span className={`connection-status ${!connections.llm ? "connection-status--demo" : ""}`}><i />{connections.llm ? "已连接" : "规则路由"}</span></div>
-      </div></section>
-
-      <section className="settings-section">
-        <div className="settings-heading"><h2>已开通场景</h2><p>{capabilities ? `${capabilities.scenes.length} 个场景可用` : capabilitiesError ? "能力目录暂不可用" : "正在读取…"}</p></div>
-        <div className="scene-nav-list settings-scene-list">
-          {capabilities?.scenes.map((scene) => {
-            const Icon = sceneIcons[scene.id] ?? Boxes;
-            return (
-              <button
-                key={scene.id}
-                className="scene-nav-item"
-                onClick={() => onSceneSelect(scene.id)}
-              >
-                <Icon size={15} strokeWidth={1.8} />
-                <span>{scene.shortLabel}</span>
-                <i className={`scene-status-dot scene-status-dot--${scene.status}`} title={scene.status === "ready" ? "已开通" : "存在使用条件"} />
-              </button>
-            );
-          })}
-          {capabilitiesError && <span className="scene-nav-loading">{capabilitiesError}</span>}
-          {!capabilities && !capabilitiesError && <span className="scene-nav-loading">正在读取 API 能力…</span>}
-        </div>
-      </section>
-
-      <section className="settings-section">
-        <div className="settings-heading"><h2>Skill 市场</h2><p>{skillsCatalog ? `${skillsCatalog.statuses.filter((s) => s.installed && s.enabled).length} 个 Skill 已启用` : skillsError ? "Skill 目录暂不可用" : "正在读取…"}</p></div>
-        <div className="scene-nav-list settings-scene-list">
-          {skillsCatalog?.skills.map((skill) => {
-            const status = skillsCatalog.statuses.find((s) => s.id === skill.id);
-            if (!status || !status.installed || !status.enabled) return null;
-            const Icon = skillIcons[skill.id] ?? Puzzle;
-            return (
-              <div key={skill.id} className="scene-nav-item scene-nav-item--skill">
-                <Icon size={15} strokeWidth={1.8} />
-                <span>{skill.name}</span>
-              </div>
-            );
-          })}
-          <button className="scene-nav-item skill-sidebar-install" onClick={onOpenSkillManager}>
-            <Plus size={15} strokeWidth={1.8} />
-            <span>管理 Skill</span>
-          </button>
-          {skillsError && (
-            <div className="skill-sidebar-error">
-              <span className="scene-nav-loading">{skillsError}</span>
-              <button className="skill-sidebar-retry" onClick={onRetrySkills}>重试</button>
+      <PageHeader eyebrow="SETTINGS" title="连接与权限" description="店铺绑定与大模型连接在这里统一管理，凭证只保存在本机服务端。" />
+      <section className="settings-section"><div className="settings-heading"><h2>聊天记录</h2><p>管理左侧“最近”中的全部对话，也可以整理到不同项目中。</p></div>
+        <div className="binding-list">
+          <div className="binding-card">
+            <div className="binding-card-header">
+              <span className="connection-logo connection-logo--llm"><MessageSquareText size={19} /></span>
+              <div className="binding-card-title"><strong>最近聊天</strong><span>搜索、重命名、归类或删除聊天记录</span></div>
+              <button className="secondary-button connection-button" onClick={onOpenConversationManager}>管理聊天<ArrowRight size={15} /></button>
             </div>
-          )}
-          {!skillsCatalog && !skillsError && <span className="scene-nav-loading">正在读取 Skill…</span>}
+          </div>
         </div>
       </section>
-
-      <section className="settings-section"><div className="settings-heading"><h2>执行策略</h2><p>策略在每次工具调用前由服务端强制校验。</p></div><div className="policy-list">
-        <div><span className="policy-icon"><Server size={18} /></span><div><strong>只读查询</strong><p>订单、商品、库存与经营指标</p></div><span className="policy-value">自动允许</span></div>
-        <div><span className="policy-icon"><Workflow size={18} /></span><div><strong>可逆写操作</strong><p>修改库存、价格和商品状态</p></div><span className="policy-value policy-value--warning">每次确认</span></div>
-        <div><span className="policy-icon"><ShieldCheck size={18} /></span><div><strong>高风险操作</strong><p>批量下架、取消订单与删除内容</p></div><span className="policy-value policy-value--blocked">管理员审批</span></div>
-      </div></section>
+      <TikTokBindingsSection
+        dashboard={dashboard}
+        tiktokConnection={tiktokConnection}
+        selectingShopId={selectingShopId}
+        onSelectTikTokShop={selectShop}
+        onBindNewShop={onBindNewShop}
+        onUnbindBinding={onUnbindBinding}
+      />
+      <LlmProvidersSection
+        overview={llmOverview}
+        onChanged={onLlmChanged}
+        onAdd={onAddLlmProvider}
+        onEdit={onEditLlmProvider}
+      />
+      <BusinessConnectorsSection
+        catalog={skillsCatalog}
+        onChanged={onSkillsChanged}
+        onConfigure={onOpenConnectorWizard}
+      />
     </div>
   );
 }
 
-export function AppPage({ view, ...props }: PageProps & { view: Exclude<ViewId, "chat" | "employees" | "intelligence" | "office" | "content_create" | "content_assets" | "content_tasks" | "kol_chat" | "kol_creators" | "kol_tasks" | "kol_data"> }) {
-  if (view === "scenes") return <CapabilitiesPage {...props} />;
+export function AppPage({ view, ...props }: PageProps & { view: Exclude<ViewId, "chat" | "employees" | "intelligence" | "office" | "content_create" | "content_assets" | "content_tasks" | "kol_chat" | "kol_creators" | "kol_tasks" | "kol_data" | "scenes"> }) {
   if (view === "automations") return <AutomationsPage {...props} />;
   if (view === "reports") return <ReportsPage {...props} />;
   if (view === "activity") return <ActivityPage {...props} />;

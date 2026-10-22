@@ -9,6 +9,14 @@ interface SkillsStore {
   [skillId: string]: StoredSkillState | undefined;
 }
 
+export interface TikTokAppRuntimeConfig {
+  appKey: string;
+  appSecret: string;
+  /** 服务市场 Service ID，决定授权页；向导配置优先于 .env 的 TIKTOK_SHOP_SERVICE_ID */
+  serviceId: string;
+  source: "skill" | "env" | "missing";
+}
+
 export interface MiaoshouRuntimeConfig {
   appKey: string;
   appSecret: string;
@@ -34,11 +42,30 @@ export interface ChuhaijiangRuntimeConfig {
   source: "skill" | "env" | "missing";
 }
 
+export interface FeishuRuntimeConfig {
+  appId: string;
+  appSecret: string;
+  baseUrl: string;
+  source: "skill" | "env" | "missing";
+}
+
+export interface FastMossRuntimeConfig {
+  apiKey: string;
+  mcpUrl: string;
+  source: "skill" | "env" | "missing";
+}
+
 // 每次对话都可能读取技能凭据：按 mtime 缓存，避免重复同步读盘解析
 let skillsCache: { mtimeMs: number; store: SkillsStore } | undefined;
 
+function skillsStorePath(): string {
+  // SKILLS_STORE 供测试隔离使用；默认仍是项目 .data/skills.json
+  const configured = process.env.SKILLS_STORE?.trim();
+  return configured || join(process.cwd(), ".data", "skills.json");
+}
+
 function storedSkillConfig(skillId: string): Record<string, string> {
-  const path = join(process.cwd(), ".data", "skills.json");
+  const path = skillsStorePath();
   try {
     const mtimeMs = statSync(path).mtimeMs;
     if (!skillsCache || skillsCache.mtimeMs !== mtimeMs) {
@@ -49,6 +76,30 @@ function storedSkillConfig(skillId: string): Record<string, string> {
     skillsCache = undefined;
     return {};
   }
+}
+
+/**
+ * TikTok Shop 开发者应用凭证（App Key / App Secret）。
+ * 优先读设置页向导保存的 skill 配置，回退 .env；向导保存后无需重启即可发起授权。
+ */
+export function getTikTokAppRuntimeConfig(): TikTokAppRuntimeConfig {
+  const stored = storedSkillConfig("tiktok-shop");
+  const storedAppKey = stored.appKey?.trim();
+  const storedAppSecret = stored.appSecret?.trim();
+  const storedServiceId = stored.serviceId?.trim() ?? "";
+  if (storedAppKey && storedAppSecret) {
+    return { appKey: storedAppKey, appSecret: storedAppSecret, serviceId: storedServiceId, source: "skill" };
+  }
+
+  const appKey = process.env.TIKTOK_SHOP_APP_KEY?.trim() ?? "";
+  const appSecret = process.env.TIKTOK_SHOP_APP_SECRET?.trim() ?? "";
+  return {
+    appKey,
+    appSecret,
+    // 向导里只补填 Service ID 时同样生效（凭证继续走 .env）
+    serviceId: storedServiceId || process.env.TIKTOK_SHOP_SERVICE_ID?.trim() || "",
+    source: appKey && appSecret ? "env" : "missing",
+  };
 }
 
 export function getMiaoshouRuntimeConfig(): MiaoshouRuntimeConfig {
@@ -131,6 +182,48 @@ export function getChuhaijiangRuntimeConfig(): ChuhaijiangRuntimeConfig {
   return {
     apiKey,
     baseUrl: process.env.CHUHAIJIANG_MCP_URL?.trim() || "https://mcp.gateway.chuhaijiang.com/mcp",
+    source: apiKey ? "env" : "missing",
+  };
+}
+
+export function getFeishuRuntimeConfig(): FeishuRuntimeConfig {
+  const stored = storedSkillConfig("feishu");
+  const storedAppId = stored.appId?.trim();
+  const storedAppSecret = stored.appSecret?.trim();
+  if (storedAppId && storedAppSecret) {
+    return {
+      appId: storedAppId,
+      appSecret: storedAppSecret,
+      baseUrl: stored.baseUrl?.trim() || "https://open.feishu.cn/open-apis",
+      source: "skill",
+    };
+  }
+
+  const appId = process.env.FEISHU_APP_ID?.trim() ?? "";
+  const appSecret = process.env.FEISHU_APP_SECRET?.trim() ?? "";
+  return {
+    appId,
+    appSecret,
+    baseUrl: process.env.FEISHU_BASE_URL?.trim() || "https://open.feishu.cn/open-apis",
+    source: appId && appSecret ? "env" : "missing",
+  };
+}
+
+export function getFastMossRuntimeConfig(): FastMossRuntimeConfig {
+  const stored = storedSkillConfig("fastmoss");
+  const storedApiKey = stored.apiKey?.trim();
+  if (storedApiKey) {
+    return {
+      apiKey: storedApiKey,
+      mcpUrl: stored.mcpUrl?.trim() || "https://mcp.fastmoss.com/mcp",
+      source: "skill",
+    };
+  }
+
+  const apiKey = process.env.FASTMOSS_API_KEY?.trim() ?? "";
+  return {
+    apiKey,
+    mcpUrl: process.env.FASTMOSS_MCP_URL?.trim() || "https://mcp.fastmoss.com/mcp",
     source: apiKey ? "env" : "missing",
   };
 }

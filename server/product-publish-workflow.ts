@@ -35,9 +35,9 @@ import { PricingStore, pricingStore } from "./pricing-store.ts";
 
 export interface ProductPublishWorkflowTools {
   listShops(): Promise<WorkflowShopOption[]>;
-  collect(sourceUrl: string): Promise<{ sourceItemId: string; commonDetailId: string }>;
+  collect(sourceUrl: string): Promise<{ sourceItemId: string; commonDetailId: string; reused?: boolean }>;
   claimToTikTok(commonDetailId: string): Promise<{ platformDetailId: string }>;
-  claimToShop?(platformDetailId: string, shopId: string): Promise<void>;
+  claimToShop?(platformDetailId: string, shopId: string, opts?: { region?: string; shopName?: string }): Promise<void>;
   enrich(input: {
     platformDetailId: string;
     shopId: string;
@@ -122,6 +122,10 @@ const LANGUAGE_BY_SITE: Record<string, string> = {
 };
 
 const PUBLISH_VERIFICATION_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+// 妙手采集是异步的，且对已采集过的链接会返回没有 payload 的 skip 行，等待要给足。
+const COLLECT_REUSE_WAIT_MS = 20_000;
+const COLLECT_WAIT_MS = 90_000;
+const COLLECT_POLL_INTERVAL_MS = 3_000;
 
 function publishVerificationExpired(run: ProductPublishWorkflowRun): boolean {
   const submittedAt = run.steps.find((step) => step.id === "publish")?.completedAt
@@ -309,18 +313,22 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
           if (!oauthId || seenIds.has(oauthId)) continue;
           const region = (shop.region || "").toUpperCase();
           const name = shop.name || "";
+          // 店铺名称是唯一可靠的身份标识，必须先在全部妙手店铺中按名称精确匹配。
+          // 旧实现把「名称匹配」和「站点匹配」写成 OR 并 break，妙手返回 [Mizora JP, Cashio]
+          // 时第一个条目靠 site=JP 命中就直接返回，导致 Cashio 被解析成 Mizora JP —— 会发错店铺。
           let miaoshouShopId: string | undefined;
-          for (const ms of miaoshouShopsList) {
-            const msShopName = String(ms.shopNick ?? ms.shopName ?? ms.platformShopName ?? "");
-            const msSite = String(ms.site ?? "").toUpperCase();
-            if ((msShopName && name && msShopName === name) || (msSite && region && msSite === region)) {
-              miaoshouShopId = String(ms.shopId ?? "");
-              break;
-            }
+          if (name) {
+            const byName = miaoshouShopsList.find((ms) => {
+              const msShopName = String(ms.shopNick ?? ms.shopName ?? ms.platformShopName ?? "");
+              return msShopName !== "" && msShopName === name;
+            });
+            if (byName) miaoshouShopId = String(byName.shopId ?? "");
           }
+          // 名称对不上时，只有当该站点下只有唯一一家妙手店铺才允许按站点兜底；
+          // 多家店时宁可留空让用户显式选择，也不要猜错店铺。
           if (!miaoshouShopId && region) {
-            const matched = miaoshouShopsList.find((ms) => String(ms.site ?? "").toUpperCase() === region);
-            if (matched) miaoshouShopId = String(matched.shopId ?? "");
+            const onSite = miaoshouShopsList.filter((ms) => String(ms.site ?? "").toUpperCase() === region);
+            if (onSite.length === 1) miaoshouShopId = String(onSite[0].shopId ?? "");
           }
           // 最终兜底：用 resolveMiaoshouShopId 独立解析
           if (!miaoshouShopId) {
@@ -366,20 +374,30 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
   },
 
   async collect(sourceUrl) {
+    // 妙手不会为已采集过的链接创建副本：重复调用 fetch_item 只会得到一条
+    // status="skip"、reason="产品已经采集过。" 且**不含任何商品数据**的行，
+    // 认领它会报「存在未采集成功的产品」，看起来像货源被封，其实是自造的重复行。
+    // 所以先按货源编号复用已有的 success 记录，确实没有时才真正采集。
     const expectedSourceItemId = sourceItemIdFrom1688Url(sourceUrl);
     if (expectedSourceItemId) {
-      const existing = await miaoshouWaitForCollection([expectedSourceItemId], 1_500, 500);
+      const existing = await miaoshouWaitForCollection([expectedSourceItemId], COLLECT_REUSE_WAIT_MS, COLLECT_POLL_INTERVAL_MS);
       const existingDetailId = existing.find((item) => item.sourceItemId === expectedSourceItemId && item.detailId)?.detailId;
-      if (existingDetailId) return { sourceItemId: expectedSourceItemId, commonDetailId: existingDetailId };
+      if (existingDetailId) return { sourceItemId: expectedSourceItemId, commonDetailId: existingDetailId, reused: true };
     }
+
     const response = await miaoshouFetchItem(sourceUrl, "1688");
     const map = asRecord(asRecord(response.data)?.sourceItemIdAndDetailIdMap) ?? {};
     const [sourceItemId] = Object.keys(map);
     if (!sourceItemId) throw new Error("妙手没有返回货源商品编号，请检查 1688 链接是否有效。");
     // fetch_item 可能映射到 skip/处理中记录，必须等公共采集箱出现同货源的 success 记录。
-    const waitResult = await miaoshouWaitForCollection([sourceItemId], 40_000, 3_000);
+    const waitResult = await miaoshouWaitForCollection([sourceItemId], COLLECT_WAIT_MS, COLLECT_POLL_INTERVAL_MS);
     const commonDetailId = waitResult.find((item) => item.sourceItemId === sourceItemId && item.detailId)?.detailId;
-    if (!commonDetailId) throw new Error("采集请求已提交，但商品尚未进入公共采集箱。可以稍后重试此步骤。");
+    if (!commonDetailId) {
+      throw new Error(
+        "采集结果不可读：妙手可能返回了一条重复采集产生的 skip 记录（不含商品数据）。" +
+        "重复重试不会修复它，反而会继续消耗采集额度；请到妙手后台确认该货源状态，或换一个尚未采集过的链接。",
+      );
+    }
     return { sourceItemId, commonDetailId };
   },
 
@@ -394,8 +412,11 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     return { platformDetailId };
   },
 
-  async claimToShop(platformDetailId, shopId) {
-    const numericShopId = Number(await ensureMiaoshouShopId(shopId));
+  async claimToShop(platformDetailId, shopId, opts) {
+    // 必须把 region / shopName 传下去：TikTok OAuth 的 shopId 是 cipher（ROW_...），
+    // 只能靠名称或站点才能解析成妙手数字店铺 ID。漏传时 resolveMiaoshouShopId 会退化到
+    // 站点优先级列表逐个试探，既慢又可能解析失败。
+    const numericShopId = Number(await ensureMiaoshouShopId(shopId, opts));
     const response = await miaoshouClaimToShop([Number(platformDetailId)], [numericShopId]);
     if (!successfulResponse(response)) throw new Error("妙手未能把商品关联到目标店铺。");
   },
@@ -981,8 +1002,14 @@ export class ProductPublishWorkflowEngine {
     }
     return this.locks.withLock(id, async () => {
       let run = await this.requireRun(id);
-      if (run.status !== "waiting_confirmation" || run.confirmationKind === "product_edit" || !run.platformDetailId || !run.shopId) {
-        throw new Error("这个任务还没有到发布确认步骤。");
+      // 必须卡死"发布确认"这一种确认卡：开始审核通过后任务是 draft/running，
+      // 排队等锁的重复 approve 不能在锁内把新产生的发布确认卡顺手确认掉
+      if (run.status !== "waiting_confirmation" || run.confirmationKind !== "product_publish" || !run.platformDetailId || !run.shopId) {
+        throw new Error(run.status === "draft" || run.status === "running"
+          ? "任务已通过开始审核，正在执行采集和认领，无需重复审核。"
+          : run.status === "failed"
+            ? "任务在执行中失败，请在任务卡片上点击「重试失败步骤」。"
+            : "这个任务还没有到发布确认步骤。");
       }
       const platformDetailId = run.platformDetailId;
       const shopId = run.miaoshouShopId || run.shopId;
@@ -1153,7 +1180,9 @@ export class ProductPublishWorkflowEngine {
           commonDetailId: collected.commonDetailId,
         }, "collect", {
           status: "completed",
-          detail: `公共采集箱 ID ${collected.commonDetailId}`,
+          detail: collected.reused
+            ? `复用已有采集记录 ${collected.commonDetailId}`
+            : `公共采集箱 ID ${collected.commonDetailId}`,
           completedAt: new Date().toISOString(),
         }));
       }
@@ -1175,7 +1204,10 @@ export class ProductPublishWorkflowEngine {
       if (this.tools.claimToShop && !run.claimedToShop) {
         run = await this.startStep(id, "claim", "正在关联到目标店铺");
         const shopIdForMiaoshou = run.miaoshouShopId || run.shopId!;
-        await this.tools.claimToShop(run.platformDetailId!, shopIdForMiaoshou);
+        await this.tools.claimToShop(run.platformDetailId!, shopIdForMiaoshou, {
+          region: run.shopSite,
+          shopName: run.shopName,
+        });
         run = await this.update(id, (current) => patchStep({ ...current, claimedToShop: true }, "claim", {
           status: "completed",
           detail: `已认领到 ${current.shopName ?? current.shopId} · TikTok 采集箱 ID ${current.platformDetailId}`,

@@ -1,5 +1,6 @@
 import { createLarkChannel, Domain, LoggerLevel, type LarkChannel, type NormalizedMessage } from "@larksuiteoapi/node-sdk";
 import { dashboard } from "./data.ts";
+import { getFeishuRuntimeConfig } from "./runtime-config.ts";
 import { handleChat } from "./orchestrator.ts";
 
 export interface FeishuBridgeStatus {
@@ -13,10 +14,8 @@ let channel: LarkChannel | undefined;
 let status: FeishuBridgeStatus = { configured: false, connected: false, state: "disabled" };
 
 function credentials() {
-  return {
-    appId: process.env.FEISHU_APP_ID?.trim() ?? "",
-    appSecret: process.env.FEISHU_APP_SECRET?.trim() ?? "",
-  };
+  const config = getFeishuRuntimeConfig();
+  return { appId: config.appId, appSecret: config.appSecret };
 }
 
 async function replyToMessage(message: NormalizedMessage): Promise<void> {

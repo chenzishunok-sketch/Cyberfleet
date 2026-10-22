@@ -806,6 +806,72 @@ export interface TikTokCapabilitiesResponse {
   warnings: string[];
 }
 
+// ─── TikTok 店铺绑定（多卖家账号 / 多国家店铺）───────────────
+
+/** 一次 OAuth 授权 = 一个卖家账号绑定；其名下多国店铺随 shops 一起进入系统 */
+export interface TikTokBindingSummary {
+  grantId: string;
+  sellerName?: string;
+  sellerRegion?: string;
+  /** connected: access token 有效；expired: access 过期但 refresh 仍可自动续；invalid: 需重新授权 */
+  status: "connected" | "expired" | "invalid";
+  /** access token 过期时间（unix 秒） */
+  expiresAt?: number;
+  shops: Array<{ id: string; name: string; region: string }>;
+  /** 该绑定内被选为当前操作的店铺 */
+  selectedShopId?: string;
+  authorizedAt: string;
+}
+
+/** TikTok 连接状态：前后端唯一权威定义（服务端 tiktok-auth.ts 与前端 api.ts 共同消费） */
+export interface TikTokConnectionStatus {
+  status: "not_configured" | "ready_to_authorize" | "shop_selection_required" | "connected" | "expired";
+  connected: boolean;
+  shopName?: string;
+  region?: string;
+  expiresAt?: number;
+  shops?: Array<{ id: string; name: string; region: string }>;
+  /** 全部已绑定卖家账号（多店铺绑定管理）；旧字段 shopName/region 描述当前选中店铺 */
+  bindings?: TikTokBindingSummary[];
+}
+
+// ─── 大模型供应商绑定（多服务商 / 全局切换）──────────────────
+
+export interface LlmProviderSummary {
+  id: string;
+  name: string;
+  baseUrl: string;
+  /** 脱敏后的 API Key（前2+***+后2），仅用于回显确认 */
+  apiKeyMasked: string;
+  model: string;
+  /** 可选快速模型：意图路由/摘要等轻任务用，留空=主模型 */
+  fastModel?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LlmProvidersOverview {
+  providers: LlmProviderSummary[];
+  activeId: string | null;
+  /** 当前生效来源：激活供应商 / .env / 未配置（规则路由） */
+  source: "provider" | "env" | "missing";
+  connected: boolean;
+  /** 当前生效服务名（供应商名或 ".env 配置"）与模型 */
+  name?: string;
+  model?: string;
+  /** 当前生效服务的 Base URL（供应商或 .env） */
+  baseUrl?: string;
+  /** 当前生效的快速模型（与主模型相同时不返回） */
+  fastModel?: string;
+}
+
+export interface LlmProviderTestResult {
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+  reply?: string;
+}
+
 // ─── Skill 管理系统 ────────────────────────────────────────────
 
 export interface SkillConfigField {
@@ -843,6 +909,14 @@ export interface SkillStatus {
 export interface SkillsCatalogResponse {
   skills: SkillDefinition[];
   statuses: SkillStatus[];
+}
+
+/** 连接器测试连接结果（真实调用一次上游业务接口） */
+export interface SkillConnectionTestResult {
+  ok: boolean;
+  latencyMs: number;
+  detail?: string;
+  error?: string;
 }
 
 // ─── 办公室实时状态（办公室页面消费的唯一数据契约）────────────

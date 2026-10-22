@@ -8045,3 +8045,531 @@ button:disabled {
     flex: 1 1 280px;
   }
 }
+
+/* ─── TikTok 店铺绑定卡片（设置页） ─────────────────────────── */
+
+.binding-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.binding-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--surface);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.binding-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.binding-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.binding-card-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.binding-card-title strong {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.binding-card-title > span {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.binding-current-badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(22, 191, 174, 0.14);
+  color: var(--green);
+  font-weight: 600;
+}
+
+.binding-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.binding-status i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--subtle);
+}
+
+.binding-status--connected i { background: var(--green); }
+.binding-status--connected { color: var(--green); }
+.binding-status--expired i { background: var(--amber); }
+.binding-status--expired { color: var(--amber); }
+.binding-status--invalid i { background: var(--red); }
+.binding-status--invalid { color: var(--red); }
+
+.binding-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(255, 59, 48, 0.08);
+  color: var(--red);
+  font-size: 12px;
+}
+
+.binding-shop-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.binding-shop-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  color: var(--muted);
+}
+
+.binding-shop-row + .binding-shop-row {
+  border-top: 1px solid var(--line);
+}
+
+.binding-shop-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.binding-shop-name strong {
+  display: block;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.binding-shop-name small {
+  font-size: 11px;
+  color: var(--subtle);
+}
+
+.binding-current-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--green);
+  font-weight: 600;
+}
+
+.binding-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.binding-unbind-button {
+  color: var(--red);
+}
+
+.binding-unbind-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 59, 48, 0.07);
+  font-size: 12px;
+  color: var(--ink);
+  flex: 1;
+}
+
+.binding-unbind-confirm span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--red);
+}
+
+.binding-empty {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  color: var(--muted);
+}
+
+.binding-empty > div {
+  flex: 1;
+}
+
+.binding-empty strong {
+  display: block;
+  font-size: 14px;
+  color: var(--ink);
+  margin-bottom: 2px;
+}
+
+.binding-empty span {
+  font-size: 12px;
+}
+
+.binding-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--aqua);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.binding-add:hover {
+  background: var(--surface-soft);
+  border-color: var(--aqua);
+}
+
+/* ─── 店铺绑定向导 ──────────────────────────────────────────── */
+
+.connection-wizard {
+  max-width: 640px;
+}
+
+.wizard-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 24px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.wizard-banner--info {
+  background: rgba(0, 113, 227, 0.08);
+  color: var(--aqua);
+}
+
+.wizard-steps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 14px 24px 0;
+}
+
+.wizard-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--subtle);
+  background: var(--surface-soft);
+}
+
+.wizard-step i {
+  font-style: normal;
+  font-weight: 600;
+}
+
+.wizard-step--done {
+  color: var(--green);
+}
+
+.wizard-step--active {
+  color: var(--aqua);
+  background: rgba(0, 113, 227, 0.1);
+  font-weight: 600;
+}
+
+.wizard-body {
+  padding-top: 16px;
+}
+
+.wizard-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.wizard-checklist {
+  margin: 0 0 14px;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.6;
+}
+
+.wizard-checklist code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-soft);
+  font-size: 12px;
+  color: var(--aqua);
+}
+
+.wizard-callback-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.wizard-callback-row code {
+  flex: 1;
+  font-size: 12px;
+  color: var(--ink);
+  word-break: break-all;
+}
+
+.wizard-note {
+  margin: 0 0 16px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.wizard-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.wizard-shop-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.wizard-shop-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.wizard-shop-option:hover {
+  border-color: var(--line-strong);
+}
+
+.wizard-shop-option--active {
+  border-color: var(--aqua);
+  background: rgba(0, 113, 227, 0.05);
+}
+
+.wizard-shop-option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.wizard-shop-option .wizard-shop-radio {
+  color: var(--subtle);
+  flex-shrink: 0;
+}
+
+.wizard-shop-option--active .wizard-shop-radio {
+  color: var(--aqua);
+}
+
+.wizard-shop-option span {
+  flex: 1;
+}
+
+.wizard-shop-option small {
+  color: var(--subtle);
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .binding-card-header {
+    flex-wrap: wrap;
+  }
+  .binding-unbind-confirm {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .wizard-callback-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* ─── 大模型绑定向导与供应商卡片 ────────────────────────────── */
+
+.llm-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.llm-preset-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.llm-preset-card:hover {
+  border-color: var(--aqua);
+}
+
+.llm-preset-card--active {
+  border-color: var(--aqua);
+  background: rgba(0, 113, 227, 0.05);
+}
+
+.llm-preset-card strong {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.llm-preset-card code {
+  font-size: 11px;
+  color: var(--aqua);
+  word-break: break-all;
+}
+
+.llm-preset-card small {
+  font-size: 11px;
+  color: var(--subtle);
+  line-height: 1.5;
+}
+
+.llm-model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.llm-model-row input {
+  flex: 1;
+}
+
+.llm-field-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--subtle);
+}
+
+.llm-test-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-bottom: 12px;
+  word-break: break-all;
+}
+
+.llm-test-result--ok {
+  border-color: rgba(36, 138, 61, 0.4);
+  background: rgba(36, 138, 61, 0.07);
+  color: var(--green);
+}
+
+.llm-test-result--fail {
+  border-color: rgba(255, 59, 48, 0.35);
+  background: rgba(255, 59, 48, 0.06);
+  color: var(--red);
+}
+
+.llm-current-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.llm-test-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.llm-test-line--ok {
+  background: rgba(36, 138, 61, 0.08);
+  color: var(--green);
+}
+
+.llm-test-line--fail {
+  background: rgba(255, 59, 48, 0.08);
+  color: var(--red);
+}
+
+

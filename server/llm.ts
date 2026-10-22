@@ -3,6 +3,7 @@ import type { WebSearchResponse } from "../shared/intelligence.ts";
 import { z } from "zod";
 import { getDigitalEmployee } from "../shared/digital-employees.ts";
 import { formatMemoryForPrompt } from "./memory.ts";
+import { getLlmRuntimeConfig } from "./llm-providers.ts";
 import { getSkillTools, getSkillAbilityDescriptions } from "./skill-registry.ts";
 import { getFastMossAbilityDescription, getFastMossTools } from "./mcp-client.ts";
 import { intelligenceStore } from "./intelligence-store.ts";
@@ -360,7 +361,7 @@ interface LlmCallOptions {
 }
 
 export function fastModel(): string | undefined {
-  return process.env.LLM_FAST_MODEL?.trim() || process.env.LLM_MODEL?.trim();
+  return getLlmRuntimeConfig().fastModel || undefined;
 }
 
 function needsDeliberateReasoning(text: string): boolean {
@@ -375,14 +376,18 @@ export async function callLlmRaw(options: LlmCallOptions): Promise<{
   assistantMessage?: ChatMessage;
   allToolCalls?: Array<{ name: string; args: Record<string, unknown>; callId: string }>;
 }> {
-  const baseUrl = (process.env.LLM_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
+  const runtime = getLlmRuntimeConfig();
+  if (!runtime.apiKey || !runtime.model) {
+    throw new Error("尚未绑定大模型服务。请到设置的「大模型连接」完成绑定，或在 .env 中配置 LLM_API_KEY / LLM_MODEL。");
+  }
+  const baseUrl = runtime.baseUrl;
   const allMessages: ChatMessage[] = [
     { role: "system", content: options.systemPrompt },
     ...options.messages,
   ];
 
   const body: Record<string, unknown> = {
-    model: options.model ?? process.env.LLM_MODEL,
+    model: options.model ?? runtime.model,
     temperature: 0.1,
     messages: allMessages,
   };
@@ -404,7 +409,7 @@ export async function callLlmRaw(options: LlmCallOptions): Promise<{
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${process.env.LLM_API_KEY}`,
+        authorization: `Bearer ${runtime.apiKey}`,
         "content-type": "application/json",
         ...(options.stream ? { accept: "text/event-stream" } : {}),
       },
@@ -564,7 +569,8 @@ export async function summarizeWebResearch(question: string, research: WebSearch
 // ─── 单步意图路由（原有功能，增加记忆支持） ────────────────────
 
 export function hasLlmConfiguration(): boolean {
-  return Boolean(process.env.LLM_API_KEY && process.env.LLM_MODEL && process.env.DEMO_MODE !== "true");
+  const config = getLlmRuntimeConfig();
+  return Boolean(config.apiKey && config.model && process.env.DEMO_MODE !== "true");
 }
 
 function agentRolePrompt(request: ChatRequest): string {

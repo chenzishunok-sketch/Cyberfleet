@@ -1,13 +1,11 @@
 import {
   BarChart3,
-  BrainCircuit,
   Bot,
   Building2,
   ChevronDown,
   ChevronRight,
   CircleUserRound,
   CircleDollarSign,
-  FileBarChart,
   FileImage,
   History,
   MessageSquareText,
@@ -16,7 +14,6 @@ import {
   ListTodo,
   Settings,
   Send,
-  Share2,
   UserSearch,
   Users,
   Workflow,
@@ -27,7 +24,7 @@ import type { Conversation } from "../conversation-store";
 import { formatConversationTime } from "../conversation-store";
 import type { AgentContext } from "../../shared/digital-employees";
 
-export type ViewId = "chat" | "employees" | "intelligence" | "office" | "topology" | "content_create" | "content_assets" | "content_tasks" | "kol_chat" | "kol_creators" | "kol_tasks" | "kol_data" | "scenes" | "automations" | "pricing" | "reports" | "activity" | "settings";
+export type ViewId = "chat" | "employees" | "intelligence" | "office" | "topology" | "content_create" | "content_assets" | "content_tasks" | "kol_chat" | "kol_creators" | "kol_tasks" | "kol_data" | "automations" | "pricing" | "reports" | "activity" | "settings";
 
 interface SidebarProps {
   activeView: ViewId;
@@ -43,13 +40,12 @@ interface SidebarProps {
   onConversationSelect: (conversationId: string) => void;
 }
 
-type ExpandableGroup = "content" | "kol" | "workflow" | "settings";
+type ExpandableGroup = "content" | "kol" | "workflow";
 
 function groupForView(view: ViewId): ExpandableGroup | undefined {
   if (view.startsWith("content_")) return "content";
   if (view === "kol_creators" || view === "kol_tasks" || view === "kol_data") return "kol";
   if (view === "automations" || view === "activity") return "workflow";
-  if (view === "settings" || view === "intelligence" || view === "topology" || view === "reports") return "settings";
   return undefined;
 }
 
@@ -71,7 +67,6 @@ export function Sidebar({
   const lastContentView = useRef<ViewId>(activeView.startsWith("content_") ? activeView : "content_create");
   const lastKolView = useRef<ViewId>(groupForView(activeView) === "kol" ? activeView : "kol_creators");
   const lastWorkflowView = useRef<ViewId>(groupForView(activeView) === "workflow" ? activeView : "automations");
-  const lastSettingsView = useRef<ViewId>(groupForView(activeView) === "settings" ? activeView : "settings");
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const stored = Number(window.localStorage.getItem("cyberfleet.sidebar.width"));
     return Number.isFinite(stored) && stored >= 220 && stored <= 320 ? stored : 248;
@@ -90,7 +85,6 @@ export function Sidebar({
     if (group === "content") lastContentView.current = activeView;
     if (group === "kol") lastKolView.current = activeView;
     if (group === "workflow") lastWorkflowView.current = activeView;
-    if (group === "settings") lastSettingsView.current = activeView;
   }, [activeView]);
 
   useEffect(() => {
@@ -141,7 +135,6 @@ export function Sidebar({
     if (group === "content") select(lastContentView.current);
     else if (group === "kol") select(lastKolView.current);
     else if (group === "workflow") select(lastWorkflowView.current);
-    else if (group === "settings") select(lastSettingsView.current);
   };
 
   return (
@@ -228,16 +221,7 @@ export function Sidebar({
         </div>
 
         <div className="sidebar-footer">
-          <div className="sidebar-nav-group">
-            <button className={`nav-item sidebar-nav-toggle ${groupForView(activeView) === "settings" ? "nav-item--active-parent" : ""}`} aria-expanded={expandedGroup === "settings"} onClick={() => toggleGroup("settings")}><Settings size={18} strokeWidth={1.8} /><span>设置</span><ChevronDown size={15} className={`sidebar-collapse-chevron ${expandedGroup === "settings" ? "" : "sidebar-collapse-chevron--collapsed"}`} /></button>
-            {expandedGroup === "settings" && <div className="sidebar-subnav">
-              <button className={`nav-item ${activeView === "settings" ? "nav-item--active" : ""}`} onClick={() => select("settings")}><Settings size={16} /><span>连接与权限</span></button>
-              <button className={`nav-item ${activeView === "intelligence" ? "nav-item--active" : ""}`} onClick={() => select("intelligence")}><BrainCircuit size={16} /><span>智能中心</span></button>
-              <button className={`nav-item ${activeView === "topology" ? "nav-item--active" : ""}`} onClick={() => select("topology")}><Share2 size={16} /><span>协作拓扑</span></button>
-              <button className={`nav-item ${activeView === "reports" ? "nav-item--active" : ""}`} onClick={() => select("reports")}><FileBarChart size={16} /><span>经营报告</span></button>
-            </div>}
-          </div>
-
+          <button className={`nav-item ${activeView === "settings" ? "nav-item--active" : ""}`} onClick={() => select("settings")}><Settings size={18} strokeWidth={1.8} /><span>设置</span></button>
         </div>
         <div
           className="sidebar-resize-handle"

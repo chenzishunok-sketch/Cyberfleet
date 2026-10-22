@@ -119,14 +119,17 @@ registerExecutor("chuhaijiang_search", async (input, ctx) => {
     const parsed = JSON.parse(result.content) as Record<string, unknown> | unknown[];
     // 参数校验失败时出海匠返回 { error, invalid_param } 且 isError=false，必须显式上抛，
     // 否则会被当成“无搜索结果”，工作流静默走空结果分支
-    const remoteError = Array.isArray(parsed) ? undefined : parsed?.error;
-    if (typeof remoteError === "string" && remoteError.trim()) {
-      throw new Error(`出海匠返回错误：${remoteError}`);
+    if (Array.isArray(parsed)) {
+      items = parsed;
+    } else {
+      if (typeof parsed?.error === "string" && parsed.error.trim()) {
+        throw new Error(`出海匠返回错误：${parsed.error}`);
+      }
+      const nestedData = parsed?.data;
+      const nestedItems = nestedData && typeof nestedData === "object" ? (nestedData as Record<string, unknown>).items : undefined;
+      const rawItems = parsed?.items ?? nestedItems ?? nestedData ?? [];
+      items = Array.isArray(rawItems) ? rawItems : [];
     }
-    const rawItems = Array.isArray(parsed)
-      ? parsed
-      : (parsed?.items ?? parsed?.data?.items ?? parsed?.data ?? []);
-    items = Array.isArray(rawItems) ? rawItems : [];
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("出海匠返回错误")) throw error;
     items = [];

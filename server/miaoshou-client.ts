@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { getMiaoshouRuntimeConfig } from "./runtime-config.ts";
+import { getLlmRuntimeConfig } from "./llm-providers.ts";
 import { callLlmRaw, fastModel } from "./llm.ts";
 
 export function hasMiaoshouConfiguration(): boolean {
@@ -62,6 +63,8 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1500;
+/** 频率超限需要等到下一个计时窗口，退避要明显长于普通重试 */
+const RATE_LIMIT_BACKOFF_MS = 3_000;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 async function miaoshouRequestOnce<T = unknown>(
@@ -137,13 +140,17 @@ export async function miaoshouRequest<T = unknown>(
       lastError = error instanceof Error ? error : new Error(String(error));
       const isHtmlError = lastError.message.includes("非 JSON 响应") || lastError.message.includes("响应格式异常");
       const isNetworkError = lastError.message.includes("fetch") || lastError instanceof TypeError;
-      // 只对 HTML 响应和网络错误重试，业务错误不重试
-      if (!isHtmlError && !isNetworkError) {
+      // 频率超限虽然被妙手当"业务错误"返回，但它是暂时性的、可重试的。
+      // 旧实现把它归入"业务错误不重试"，于是调用方（尤其是轮询里的空 catch）
+      // 会把"被限流"静默当成"没有数据"。
+      const isRateLimited = lastError.message.includes("频率超限");
+      if (!isHtmlError && !isNetworkError && !isRateLimited) {
         throw lastError;
       }
-      console.warn(`[miaoshou] ${path} 第${attempt}次请求失败: ${lastError.message}，${attempt < maxAttempts ? `${RETRY_DELAY_MS}ms 后重试` : "已达最大重试次数"}`);
+      const delay = isRateLimited ? RATE_LIMIT_BACKOFF_MS * attempt : RETRY_DELAY_MS * attempt;
+      console.warn(`[miaoshou] ${path} 第${attempt}次请求失败: ${lastError.message}，${attempt < maxAttempts ? `${delay}ms 后重试` : "已达最大重试次数"}`);
       if (attempt < maxAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * attempt));
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
   }
@@ -161,6 +168,11 @@ export async function miaoshouFetchItem(sourceUrl: string, platform = "1688") {
 }
 
 /** 等待采集完成（轮询公共采集箱，直到找到匹配的 item_id） */
+function numericId(value: string): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 export async function miaoshouWaitForCollection(
   sourceItemIds: string[],
   maxWaitMs = 30000,
@@ -173,35 +185,38 @@ export async function miaoshouWaitForCollection(
     const remaining = sourceItemIds.filter((id) => !found.has(id));
     if (remaining.length === 0) break;
 
-    try {
-      const result = await miaoshouGetCommonCollectBoxList(1, 50);
-      const data = result.data as { detailList?: Array<Record<string, unknown>>; list?: Array<Record<string, unknown>> } | undefined;
-      const list = data?.detailList ?? data?.list ?? [];
+    for (const targetId of remaining) {
+      try {
+        // 用货源编号让服务端过滤，而不是拉回第一页再本地扫描：公共采集箱通常已经堆了几十上百条
+        // 历史记录，目标的 success 行经常不在第一页，本地扫描会把它误判成"尚未进入公共采集箱"。
+        const result = await miaoshouGetCommonCollectBoxList(1, 20, targetId);
+        const data = result.data as { detailList?: Array<Record<string, unknown>>; list?: Array<Record<string, unknown>> } | undefined;
+        const list = data?.detailList ?? data?.list ?? [];
 
-      for (const item of list) {
-        const collectionStatus = String(item.status ?? item.collectStatus ?? "").trim().toLowerCase();
-        if (collectionStatus !== "success" && collectionStatus !== "collectsuccess") continue;
-        // 公共采集箱主键为 commonCollectBoxDetailId，货源 ID 在 sourceList 中
-        const detailId = String(item.commonCollectBoxDetailId ?? item.detail_id ?? item.id ?? "");
-        const sourceList = item.sourceList as Array<Record<string, unknown>> | undefined;
-        const sourceItemIds_fromList = sourceList?.map((s) => String(s.sourceItemId ?? "").trim()).filter(Boolean) ?? [];
-        const itemId = String(item.item_id ?? item.sourceItemId ?? "");
-        
-        for (const targetId of remaining) {
+        for (const item of list) {
+          const collectionStatus = String(item.status ?? item.collectStatus ?? "").trim().toLowerCase();
+          if (collectionStatus !== "success" && collectionStatus !== "collectsuccess") continue;
+          // 公共采集箱主键为 commonCollectBoxDetailId，货源 ID 可能在顶层或 sourceList 中
+          const detailId = String(item.commonCollectBoxDetailId ?? item.detail_id ?? item.id ?? "").trim();
+          if (!detailId) continue;
+
+          const sourceList = item.sourceList as Array<Record<string, unknown>> | undefined;
+          const candidates = new Set(
+            [
+              String(item.item_id ?? item.sourceItemId ?? "").trim(),
+              ...(sourceList?.map((entry) => String(entry.sourceItemId ?? "").trim()) ?? []),
+            ].filter(Boolean),
+          );
           // 货源编号必须精确匹配。空字符串或模糊包含会把其他商品误认成目标商品。
-          if (itemId.trim() && itemId.trim() === targetId.trim()) {
-            found.set(targetId, detailId);
-          }
-          // 也检查 sourceList 中的 sourceItemId
-          for (const sid of sourceItemIds_fromList) {
-            if (sid === targetId.trim()) {
-              found.set(targetId, detailId);
-            }
-          }
+          if (!candidates.has(targetId.trim())) continue;
+
+          // 同一货源可能存在多条记录，取编号最大的那条（最新的）而不是第一次遇到的。
+          const previous = found.get(targetId);
+          if (!previous || numericId(detailId) > numericId(previous)) found.set(targetId, detailId);
         }
+      } catch {
+        // 轮询期间 API 错误不中断，继续等待
       }
-    } catch {
-      // 轮询期间 API 错误不中断，继续等待
     }
 
     if (found.size < sourceItemIds.length) {
@@ -212,13 +227,15 @@ export async function miaoshouWaitForCollection(
   return sourceItemIds.map((id) => ({ sourceItemId: id, detailId: found.get(id) ?? "" }));
 }
 
-/** 获取公共采集箱列表 — 需要 filter 对象 */
-export async function miaoshouGetCommonCollectBoxList(page = 1, pageSize = 20) {
+/** 获取公共采集箱列表 — 需要 filter 对象；传 sourceItemIdKeyword 时交给服务端按货源编号过滤 */
+export async function miaoshouGetCommonCollectBoxList(page = 1, pageSize = 20, sourceItemIdKeyword?: string) {
   return miaoshouRequest("/open/v1/product/common_collect_box/common_collect_box/get_common_collect_box_list", {
     pageNo: page,
     pageSize,
     filter: {
-      tabPaneName: "all",
+      // "collectSucess" 是妙手自己的枚举拼写（少一个 c），不要"纠正"成 collectSuccess
+      tabPaneName: sourceItemIdKeyword ? "collectSucess" : "all",
+      ...(sourceItemIdKeyword ? { sourceItemIdKeyword } : {}),
     },
   });
 }
@@ -355,7 +372,8 @@ export async function resolveMiaoshouShopId(
     return trySite(region.toUpperCase());
   }
 
-  const prioritySites = ["TH", "US", "MY", "PH", "SG", "VN", "ID", "UK"];
+  // 没有站点信息时按顺序试探。JP 曾经缺失，导致已授权的日本站店铺永远解析不出来。
+  const prioritySites = ["TH", "JP", "US", "MY", "PH", "SG", "VN", "ID", "UK", "MX", "BR", "DE", "ES", "FR", "IT", "IE"];
   for (const site of prioritySites) {
     const found = await trySite(site);
     if (found) return found;
@@ -484,7 +502,7 @@ ${langLabel}
 
   // 尝试调用 LLM，如果快速模型失败则切换到主模型
   const fastModelName = fastModel();
-  const mainModelName = process.env.LLM_MODEL?.trim();
+  const mainModelName = getLlmRuntimeConfig().model || undefined;
   let result: { content?: string } | undefined;
   let lastError: Error | undefined;
 

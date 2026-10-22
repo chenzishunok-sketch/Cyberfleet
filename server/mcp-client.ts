@@ -5,6 +5,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { getFastMossRuntimeConfig } from "./runtime-config.ts";
 
 // ─── 类型定义 ─────────────────────────────────────────────────
 
@@ -30,12 +31,11 @@ let cachedTools: McpToolDefinition[] | null = null;
 let connectPromise: Promise<void> | null = null;
 
 function getMcpUrl(): string {
-  const baseUrl = process.env.FASTMOSS_MCP_URL ?? "https://mcp.fastmoss.com/mcp";
-  const apiKey = process.env.FASTMOSS_API_KEY ?? "";
-  if (!apiKey) throw new Error("缺少 FASTMOSS_API_KEY 配置");
+  const { apiKey, mcpUrl } = getFastMossRuntimeConfig();
+  if (!apiKey) throw new Error("缺少 FastMoss API Key 配置");
   // 如果 URL 已经包含 query 参数，则追加；否则新建
-  const separator = baseUrl.includes("?") ? "&" : "?";
-  return `${baseUrl}${separator}api_key=${apiKey}`;
+  const separator = mcpUrl.includes("?") ? "&" : "?";
+  return `${mcpUrl}${separator}api_key=${apiKey}`;
 }
 
 async function connectClient(): Promise<void> {
@@ -112,7 +112,23 @@ async function connectClient(): Promise<void> {
 
 /** 检查是否配置了 FastMoss */
 export function hasFastMossConfiguration(): boolean {
-  return Boolean(process.env.FASTMOSS_MCP_URL && process.env.FASTMOSS_API_KEY);
+  return getFastMossRuntimeConfig().source !== "missing";
+}
+
+/** 换绑/解绑后调用：丢弃旧的 MCP 连接与工具缓存，下次使用时按新凭证重建 */
+export function resetFastMossConnection(): void {
+  void transport?.close().catch(() => undefined);
+  client = null;
+  transport = null;
+  cachedTools = null;
+  connectPromise = null;
+}
+
+/** 连接测试探针：真实建连 + listTools（零消耗），失败抛出真实原因 */
+export async function probeFastMossConnection(): Promise<number> {
+  if (!hasFastMossConfiguration()) throw new Error("FastMoss MCP 尚未配置，请先填写 MCP 地址和 API Key。");
+  await connectClient();
+  return cachedTools?.length ?? 0;
 }
 
 /** 获取 FastMoss MCP 提供的所有工具定义（OpenAI function calling 格式） */

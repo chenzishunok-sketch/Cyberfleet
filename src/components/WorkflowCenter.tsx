@@ -456,10 +456,12 @@ function ProductRunCard({ initialRun, onChange, compact = false }: RunCardProps<
     onChange?.(next);
   };
   useEffect(() => {
-    if (!ACTIVE_STATUSES.has(run.status)) return;
+    // waiting_confirmation 时也轮询（与 DAG 卡一致）：聊天里的卡片是静态快照，
+    // 不轮询会永远停在旧状态；busy 期间轮询覆盖 approve/retry 长链路执行期
+    if (!ACTIVE_STATUSES.has(run.status) && run.status !== "waiting_confirmation" && !busy) return;
     const timer = window.setInterval(() => { void api.workflow(run.id).then(({ run: next }) => replaceRun(next)).catch(() => undefined); }, 1500);
     return () => window.clearInterval(timer);
-  }, [run.id, run.status]);
+  }, [run.id, run.status, busy]);
 
   const act = async (name: string, operation: () => Promise<{ run: BusinessWorkflowRun }>) => {
     setBusy(name); setError(undefined);
@@ -525,10 +527,12 @@ function FlashSaleRunCard({ initialRun, onChange, compact = false }: RunCardProp
   useEffect(() => { setRun(initialRun); }, [initialRun]);
   const replaceRun = (next: BusinessWorkflowRun) => { if (next.type === "flash_sale") { setRun(next); onChange?.(next); } };
   useEffect(() => {
-    if (!ACTIVE_STATUSES.has(run.status)) return;
+    // waiting_confirmation 时也轮询（与 DAG 卡一致）：聊天里的卡片是静态快照，
+    // 不轮询会永远停在旧状态；busy 期间轮询覆盖 approve/retry 长链路执行期
+    if (!ACTIVE_STATUSES.has(run.status) && run.status !== "waiting_confirmation" && !busy) return;
     const timer = window.setInterval(() => { void api.workflow(run.id).then(({ run: next }) => replaceRun(next)).catch(() => undefined); }, 1500);
     return () => window.clearInterval(timer);
-  }, [run.id, run.status]);
+  }, [run.id, run.status, busy]);
   const act = async (name: string, operation: () => Promise<{ run: BusinessWorkflowRun }>) => {
     setBusy(name); setError(undefined);
     try { replaceRun((await operation()).run); }
@@ -563,10 +567,12 @@ function KolRunCard({ initialRun, onChange, compact = false }: RunCardProps<KolO
     onChange?.(next);
   };
   useEffect(() => {
-    if (!ACTIVE_STATUSES.has(run.status)) return;
+    // waiting_confirmation 时也轮询（与 DAG 卡一致）：聊天里的卡片是静态快照，
+    // 不轮询会永远停在旧状态；busy 期间轮询覆盖 approve/retry 长链路执行期
+    if (!ACTIVE_STATUSES.has(run.status) && run.status !== "waiting_confirmation" && !busy) return;
     const timer = window.setInterval(() => { void api.workflow(run.id).then(({ run: next }) => replaceRun(next)).catch(() => undefined); }, 1500);
     return () => window.clearInterval(timer);
-  }, [run.id, run.status]);
+  }, [run.id, run.status, busy]);
   const act = async (name: string, operation: () => Promise<{ run: BusinessWorkflowRun }>) => {
     setBusy(name); setError(undefined);
     try { replaceRun((await operation()).run); }
@@ -617,10 +623,10 @@ function DagRunCard({ initialRun, onChange, compact = false }: RunCardProps<DagW
     onChange?.(next);
   };
   useEffect(() => {
-    if (!ACTIVE_STATUSES.has(run.status) && run.status !== "waiting_confirmation") return;
+    if (!ACTIVE_STATUSES.has(run.status) && run.status !== "waiting_confirmation" && !busy) return;
     const timer = window.setInterval(() => { void api.workflow(run.id).then(({ run: next }) => replaceRun(next)).catch(() => undefined); }, 1500);
     return () => window.clearInterval(timer);
-  }, [run.id, run.status]);
+  }, [run.id, run.status, busy]);
 
   const act = async (name: string, operation: () => Promise<{ run: BusinessWorkflowRun }>) => {
     setBusy(name); setError(undefined);

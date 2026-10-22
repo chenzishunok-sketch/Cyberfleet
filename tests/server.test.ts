@@ -40,6 +40,8 @@ describe("ShopPilot API", () => {
     vi.stubEnv("TIKTOK_SHOP_ACCESS_TOKEN", "");
     vi.stubEnv("TIKTOK_SHOP_SHOP_CIPHER", "");
     vi.stubEnv("TIKTOK_SHOP_TOKEN_STORE", path.join(authTestDirectory, "authorization.json"));
+    vi.stubEnv("SKILLS_STORE", path.join(authTestDirectory, "skills.json"));
+    vi.stubEnv("LLM_PROVIDERS_STORE", path.join(authTestDirectory, "llm-providers.json"));
     vi.stubEnv("WORKFLOW_DATABASE", path.join(authTestDirectory, "workflows.sqlite"));
     vi.stubEnv("ACTION_PLAN_DATABASE", path.join(authTestDirectory, "action-plans.sqlite"));
     vi.stubEnv("INTELLIGENCE_DATABASE", path.join(authTestDirectory, "intelligence.sqlite"));
@@ -51,6 +53,8 @@ describe("ShopPilot API", () => {
     clearTikTokDataCache();
     vi.restoreAllMocks();
     await rm(path.join(authTestDirectory, "authorization.json"), { force: true });
+    await rm(path.join(authTestDirectory, "skills.json"), { force: true });
+    await rm(path.join(authTestDirectory, "llm-providers.json"), { force: true });
     await rm(path.join(authTestDirectory, "memory.json"), { force: true });
   });
 
@@ -69,6 +73,7 @@ describe("ShopPilot API", () => {
       mode: "demo",
       connections: { llm: false, tiktok: false, miaoshou: false, tmapi: false, feishu: false, kolBridge: false },
       tiktok: { status: "not_configured", connected: false },
+      llm: { connected: false, source: "missing" },
       miaoshou: { connected: false },
       tmapi: { connected: false },
       feishu: { configured: false, connected: false, longConnection: false, bridgeState: "disabled" },
@@ -461,6 +466,8 @@ describe("ShopPilot API", () => {
       .set("Cookie", oauthCookie)
       .expect(200);
     expect(callback.text).toContain("TikTok Shop 已连接");
+    // 中转页跳回前端时携带绑定结果参数，供前端提示并刷新绑定列表
+    expect(callback.text).toContain("bind=tiktok");
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     const tokenUrl = new URL(String(fetchMock.mock.calls[0][0]));
@@ -473,12 +480,15 @@ describe("ShopPilot API", () => {
     expect(shopUrl.searchParams.has("shop_cipher")).toBe(false);
 
     const stored = JSON.parse(await readFile(path.join(authTestDirectory, "authorization.json"), "utf8"));
-    expect(stored).toMatchObject({
+    expect(stored.version).toBe(2);
+    expect(stored.grants).toHaveLength(1);
+    expect(stored.grants[0]).toMatchObject({
       accessToken: "test-access-token",
       refreshToken: "test-refresh-token",
-      selectedShopCipher: "test-shop-cipher",
+      sellerName: "Test Shop",
       shops: [{ name: "Test Shop", region: "US", cipher: "test-shop-cipher" }],
     });
+    expect(stored.selected).toEqual({ grantId: stored.grants[0].grantId, shopId: "shop-1" });
 
     const health = await request(app).get("/api/health").expect(200);
     expect(health.body.tiktok).toMatchObject({ status: "connected", connected: true, shopName: "Test Shop", region: "US" });
@@ -496,6 +506,67 @@ describe("ShopPilot API", () => {
       .set("Cookie", oauthCookie)
       .expect(400);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("starts authorization with app credentials saved from the skill store", async () => {
+    vi.stubEnv("TIKTOK_SHOP_APP_KEY", "");
+    vi.stubEnv("TIKTOK_SHOP_APP_SECRET", "");
+    await writeFile(path.join(authTestDirectory, "skills.json"), JSON.stringify({
+      "tiktok-shop": { installed: true, enabled: true, config: { appKey: "skill-app-key", appSecret: "skill-app-secret" } },
+    }));
+
+    const authorization = await request(app).get("/api/tiktok/authorize").expect(302);
+    expect(new URL(authorization.headers.location).searchParams.get("state")).toMatch(/^[a-f0-9]{64}$/);
+
+    const catalog = await request(app).get("/api/skills").expect(200);
+    const tiktok = catalog.body.statuses.find((status: { id: string }) => status.id === "tiktok-shop");
+    // App Key 非密码字段原样回显；App Secret 脱敏且全文不得出现原始值
+    expect(tiktok.config.appKey).toBe("skill-app-key");
+    expect(tiktok.config.appSecret).toMatch(/^sk\*+et$/);
+    expect(JSON.stringify(catalog.body)).not.toContain("skill-app-secret");
+  });
+
+  it("lists and removes store bindings without touching other grants", async () => {
+    vi.stubEnv("TIKTOK_SHOP_APP_KEY", "test-app-key");
+    vi.stubEnv("TIKTOK_SHOP_APP_SECRET", "test-app-secret");
+    const now = Math.floor(Date.now() / 1000);
+    const shop = (id: string, name: string, region: string, cipher: string) => ({ id, name, region, cipher });
+    const grant = (grantId: string, accessToken: string, sellerName: string, shops: Array<{ id: string; name: string; region: string; cipher: string }>) => ({
+      grantId,
+      accessToken,
+      accessTokenExpiresAt: now + 604800,
+      refreshToken: `refresh-${grantId}`,
+      refreshTokenExpiresAt: now + 31536000,
+      sellerName,
+      sellerRegion: "CN",
+      grantedScopes: ["seller.authorization.info"],
+      shops,
+      authorizedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await writeFile(path.join(authTestDirectory, "authorization.json"), JSON.stringify({
+      version: 2,
+      selected: { grantId: "grant-th", shopId: "shop-th" },
+      grants: [
+        grant("grant-th", "token-th", "Mikolo TH", [shop("shop-th", "Mikolo", "TH", "cipher-th")]),
+        grant("grant-us", "token-us", "Mikolo US", [shop("shop-us", "Mikolo Store", "US", "cipher-us")]),
+      ],
+    }));
+
+    const bindings = await request(app).get("/api/tiktok/bindings").expect(200);
+    expect(bindings.body.bindings).toHaveLength(2);
+    expect(bindings.body.bindings.map((binding: { grantId: string }) => binding.grantId)).toEqual(["grant-th", "grant-us"]);
+    expect(bindings.body.tiktok).toMatchObject({ status: "connected", shopName: "Mikolo", region: "TH" });
+
+    const removed = await request(app).delete("/api/tiktok/bindings/grant-th").expect(200);
+    expect(removed.body.ok).toBe(true);
+    // 解绑的是当前店铺所在 grant：选中被清空，状态回落到待选择，剩余绑定保留
+    expect(removed.body.tiktok.status).toBe("shop_selection_required");
+    expect(removed.body.tiktok.bindings).toHaveLength(1);
+    expect(removed.body.tiktok.bindings[0].grantId).toBe("grant-us");
+
+    const replay = await request(app).delete("/api/tiktok/bindings/grant-th").expect(400);
+    expect(replay.body.error).toContain("没有找到");
   });
 
   it("requires an explicit selection when OAuth returns multiple shops", async () => {
@@ -542,11 +613,23 @@ describe("ShopPilot API", () => {
         { id: "shop-1", name: "US Shop", region: "US" },
         { id: "shop-2", name: "UK Shop", region: "GB" },
       ],
+      bindings: [
+        {
+          grantId: expect.any(String),
+          status: "connected",
+          expiresAt: now + 604800,
+          shops: [
+            { id: "shop-1", name: "US Shop", region: "US" },
+            { id: "shop-2", name: "UK Shop", region: "GB" },
+          ],
+          authorizedAt: expect.any(String),
+        },
+      ],
     });
 
     const selected = await request(app).post("/api/tiktok/shop").send({ shopId: "shop-2" }).expect(200);
     expect(selected.body.tiktok).toMatchObject({ status: "connected", connected: true, shopName: "UK Shop", region: "GB" });
     const stored = JSON.parse(await readFile(path.join(authTestDirectory, "authorization.json"), "utf8"));
-    expect(stored.selectedShopCipher).toBe("cipher-gb");
+    expect(stored.selected).toEqual({ grantId: stored.grants[0].grantId, shopId: "shop-2" });
   });
 });

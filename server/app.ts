@@ -3,7 +3,6 @@ import { z } from "zod";
 import type { ChatRequest, MessageArtifact, SkuPricingRecord } from "../shared/contracts.ts";
 import { AGENT_CONTEXTS, type AgentContext } from "../shared/digital-employees.ts";
 import { dashboard } from "./data.ts";
-import { hasLlmConfiguration } from "./llm.ts";
 import { approveAction, handleChat, rejectAction } from "./orchestrator.ts";
 import { agentRegistry } from "./agent-registry.ts";
 import { getCollaborationOverview, agentBus } from "./agent-bus.ts";
@@ -16,7 +15,18 @@ import { getRecentInsights } from "./proactive-agent.ts";
 import { memoryLayer } from "./memory-layer.ts";
 import { taskQueue } from "./task-queue.ts";
 import { learningLoop } from "./learning-loop.ts";
-import { completeTikTokAuthorization, createTikTokAuthorizationUrl, getTikTokConnectionStatus, selectAuthorizedShop } from "./tiktok-auth.ts";
+import { completeTikTokAuthorization, createTikTokAuthorizationUrl, getTikTokConnectionStatus, listBindings, removeBinding, selectAuthorizedShop } from "./tiktok-auth.ts";
+import {
+  activateProvider,
+  addProvider,
+  getLlmProvidersOverview,
+  getStoredProvider,
+  importEnvProvider,
+  listProviderModels,
+  removeProvider,
+  testLlmProvider,
+  updateProvider,
+} from "./llm-providers.ts";
 import { getTikTokCapabilities } from "./tiktok-capabilities.ts";
 import { getCurrentDashboard } from "./tiktok-data.ts";
 import { getFeishuConnectionStatus, hasFeishuConfiguration } from "./feishu-client.ts";
@@ -42,8 +52,10 @@ import {
   uninstallSkill,
   enableSkill,
   disableSkill,
+  clearSkillConfig,
   updateSkillConfig,
 } from "./skill-registry.ts";
+import { testSkillConnection } from "./skill-connectors.ts";
 import { intelligenceStore } from "./intelligence-store.ts";
 import { KNOWLEDGE_CATEGORIES } from "../shared/intelligence.ts";
 import { searchWeb } from "./web-search-client.ts";
@@ -69,7 +81,25 @@ const chatSchema: z.ZodType<ChatRequest> = z.object({
     .optional(),
 });
 
-const selectShopSchema = z.object({ shopId: z.string().min(1).max(200) });
+const selectShopSchema = z.object({
+  shopId: z.string().min(1).max(200),
+  grantId: z.string().min(1).max(100).optional(),
+});
+const llmProviderInputSchema = z.object({
+  name: z.string().trim().min(1).max(60),
+  baseUrl: z.string().trim().min(1).max(300),
+  apiKey: z.string().trim().max(300).optional(),
+  model: z.string().trim().min(1).max(120).optional(),
+  fastModel: z.string().trim().max(120).optional(),
+});
+// 编辑换绑允许只提交部分字段
+const llmProviderUpdateSchema = llmProviderInputSchema.partial();
+const llmProviderProbeSchema = z.object({
+  id: z.string().trim().min(1).max(100).optional(),
+  baseUrl: z.string().trim().max(300).optional(),
+  apiKey: z.string().trim().max(300).optional(),
+  model: z.string().trim().max(120).optional(),
+});
 const tmapiItemQuerySchema = z.object({
   language: z.enum(["en", "zh", "ru", "th", "pt", "es", "tr", "vi", "ja", "ko"]).optional(),
   scene: z.literal("drop_shipping").optional(),
@@ -265,6 +295,7 @@ export function createApp() {
     }
     const tiktok = await getTikTokConnectionStatus();
     const demoMode = process.env.DEMO_MODE === "true";
+    const llmOverview = getLlmProvidersOverview();
     const miaoshou = hasMiaoshouConfiguration();
     const tmapi = hasTmapiConfiguration();
     const feishu = demoMode
@@ -272,7 +303,7 @@ export function createApp() {
       : await getFeishuConnectionStatus();
     const feishuBridge = getFeishuBridgeStatus();
     const connections = {
-      llm: hasLlmConfiguration(),
+      llm: llmOverview.connected,
       tiktok: !demoMode && tiktok.connected,
       miaoshou: !demoMode && miaoshou,
       tmapi: !demoMode && tmapi,
@@ -285,6 +316,12 @@ export function createApp() {
       mode,
       connections,
       tiktok,
+      llm: {
+        connected: llmOverview.connected,
+        source: llmOverview.source,
+        ...(llmOverview.name ? { name: llmOverview.name } : {}),
+        ...(llmOverview.model ? { model: llmOverview.model } : {}),
+      },
       miaoshou: { connected: !demoMode && miaoshou },
       tmapi: { connected: !demoMode && tmapi },
       feishu: { ...feishu, longConnection: feishuBridge.connected, bridgeState: feishuBridge.state },
@@ -739,14 +776,14 @@ export function createApp() {
       response.type("html").send(renderAuthorizationPage({
         title: "TikTok Shop 已连接",
         message,
-        frontendUrl,
+        frontendUrl: `${frontendUrl}/?bind=tiktok&result=success`,
         success: true,
       }));
     } catch (error) {
       response.status(400).type("html").send(renderAuthorizationPage({
         title: "TikTok Shop 授权未完成",
         message: error instanceof Error ? error.message : "授权失败，请返回应用重新尝试。",
-        frontendUrl,
+        frontendUrl: `${frontendUrl}/?bind=tiktok&result=error`,
         success: false,
       }));
     }
@@ -759,10 +796,35 @@ export function createApp() {
       return;
     }
     try {
-      const shop = await selectAuthorizedShop(parsed.data.shopId);
+      const shop = await selectAuthorizedShop(parsed.data.shopId, parsed.data.grantId);
       response.json({ shop, tiktok: await getTikTokConnectionStatus() });
     } catch (error) {
       response.status(400).json({ error: error instanceof Error ? error.message : "无法选择店铺。" });
+    }
+  });
+
+  // ─── 多店铺绑定管理：列表 / 解绑 ─────────────────────────────
+
+  app.get("/api/tiktok/bindings", async (_request, response) => {
+    try {
+      response.json({ bindings: await listBindings(), tiktok: await getTikTokConnectionStatus() });
+    } catch (error) {
+      response.status(500).json({ error: error instanceof Error ? error.message : "读取店铺绑定失败。" });
+    }
+  });
+
+  app.delete("/api/tiktok/bindings/:grantId", async (request, response) => {
+    const grantId = typeof request.params.grantId === "string" ? request.params.grantId : "";
+    if (!grantId) {
+      response.status(400).json({ error: "缺少绑定编号。" });
+      return;
+    }
+    try {
+      await removeBinding(grantId);
+      healthCache = undefined;
+      response.json({ ok: true, tiktok: await getTikTokConnectionStatus() });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : "解绑失败。" });
     }
   });
 
@@ -771,6 +833,122 @@ export function createApp() {
       response.json(await getCurrentDashboard());
     } catch (error) {
       response.status(502).json({ error: error instanceof Error ? error.message : "读取 TikTok Shop 数据失败。" });
+    }
+  });
+
+  // ─── 大模型供应商绑定：列表 / 新增 / 换绑 / 解绑 / 切换 / 测试 ────
+
+  app.get("/api/llm/providers", (_request, response) => {
+    response.json(getLlmProvidersOverview());
+  });
+
+  app.post("/api/llm/providers", async (request, response) => {
+    const parsed = llmProviderInputSchema.safeParse(request.body);
+    if (!parsed.success || !parsed.data.model) {
+      response.status(400).json({ error: "请填写服务名称、Base URL 和模型名称。" });
+      return;
+    }
+    try {
+      const provider = await addProvider({
+        name: parsed.data.name,
+        baseUrl: parsed.data.baseUrl,
+        apiKey: parsed.data.apiKey ?? "",
+        model: parsed.data.model,
+        ...(parsed.data.fastModel ? { fastModel: parsed.data.fastModel } : {}),
+      });
+      response.json({ provider, overview: getLlmProvidersOverview() });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : "保存模型服务失败。" });
+    }
+  });
+
+  app.put("/api/llm/providers/:id", async (request, response) => {
+    const parsed = llmProviderUpdateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      response.status(400).json({ error: "提交的模型服务信息不完整。" });
+      return;
+    }
+    try {
+      const provider = await updateProvider(request.params.id as string, parsed.data);
+      response.json({ provider, overview: getLlmProvidersOverview() });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : "更新模型服务失败。" });
+    }
+  });
+
+  app.delete("/api/llm/providers/:id", async (request, response) => {
+    try {
+      await removeProvider(request.params.id as string);
+      response.json({ ok: true, overview: getLlmProvidersOverview() });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : "解绑模型服务失败。" });
+    }
+  });
+
+  app.post("/api/llm/providers/:id/activate", async (request, response) => {
+    try {
+      const provider = await activateProvider(request.params.id as string);
+      response.json({ provider, overview: getLlmProvidersOverview() });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : "切换模型服务失败。" });
+    }
+  });
+
+  // 测试连接：带 id 且 apiKey 留空/带回显掩码时复用已保存的密钥
+  app.post("/api/llm/providers/import-env", async (_request, response) => {
+    try {
+      const provider = await importEnvProvider();
+      response.json({ provider, overview: getLlmProvidersOverview() });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : "导入 .env 配置失败。" });
+    }
+  });
+
+  app.post("/api/llm/providers/test", async (request, response) => {
+    const parsed = llmProviderProbeSchema.safeParse(request.body);
+    if (!parsed.success) {
+      response.status(400).json({ error: "请求参数不完整。" });
+      return;
+    }
+    try {
+      let { baseUrl, apiKey, model } = parsed.data;
+      if (parsed.data.id) {
+        const stored = getStoredProvider(parsed.data.id);
+        if (!stored) {
+          response.status(400).json({ error: "没有找到这个模型服务。" });
+          return;
+        }
+        baseUrl = baseUrl || stored.baseUrl;
+        if (!apiKey || apiKey.includes("*")) apiKey = stored.apiKey;
+        model = model || stored.model;
+      }
+      const result = await testLlmProvider({ baseUrl: baseUrl ?? "", apiKey: apiKey ?? "", model: model ?? "" });
+      response.json(result);
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : "测试连接失败。" });
+    }
+  });
+
+  app.post("/api/llm/providers/models", async (request, response) => {
+    const parsed = llmProviderProbeSchema.safeParse(request.body);
+    if (!parsed.success) {
+      response.status(400).json({ error: "请求参数不完整。" });
+      return;
+    }
+    try {
+      let { baseUrl, apiKey } = parsed.data;
+      if (parsed.data.id) {
+        const stored = getStoredProvider(parsed.data.id);
+        if (!stored) {
+          response.status(400).json({ error: "没有找到这个模型服务。" });
+          return;
+        }
+        baseUrl = baseUrl || stored.baseUrl;
+        if (!apiKey || apiKey.includes("*")) apiKey = stored.apiKey;
+      }
+      response.json(await listProviderModels({ baseUrl: baseUrl ?? "", apiKey: apiKey ?? "" }));
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : "读取模型列表失败。" });
     }
   });
 
@@ -1159,6 +1337,26 @@ export function createApp() {
     }
   });
 
+  // 连接测试：用当前生效配置（界面保存 > .env）发一次最小真实业务调用
+  app.post("/api/skills/:id/test", async (request, response) => {
+    const skillId = request.params.id as string;
+    if (skillId === "tiktok-shop") {
+      response.status(400).json({ error: "TikTok Shop 请在「TikTok Shop 店铺绑定」区完成授权与测试。" });
+      return;
+    }
+    response.json(await testSkillConnection(skillId));
+  });
+
+  // 解绑：清除界面保存的配置，回落 .env
+  app.delete("/api/skills/:id/config", async (request, response) => {
+    try {
+      await clearSkillConfig(request.params.id as string);
+      response.json({ ok: true, catalog: await getSkillsCatalog() });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : "解绑失败。" });
+    }
+  });
+
   app.post("/api/chat", async (request, response) => {
     const parsed = chatSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -1257,9 +1455,12 @@ function oauthStateCookie(value: string, maxAge = 15 * 60): string {
 }
 
 function getFrontendUrl(): string {
-  const configured = process.env.FRONTEND_URL ?? "http://localhost:5180";
+  // 默认跟随 npm run dev 的 Vite 端口 5182；5180/5173 保留给历史部署
+  const configured = process.env.FRONTEND_URL?.trim() || "http://localhost:5182";
   const url = new URL(configured);
   const allowedOrigins = new Set([
+    "http://localhost:5182",
+    "http://127.0.0.1:5182",
     "http://localhost:5180",
     "http://127.0.0.1:5180",
     "http://localhost:5173",

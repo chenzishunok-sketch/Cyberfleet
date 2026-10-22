@@ -1,3 +1,5 @@
+import { getFeishuRuntimeConfig } from "./runtime-config.ts";
+
 interface FeishuTokenResponse {
   code?: number;
   msg?: string;
@@ -16,10 +18,11 @@ export interface FeishuConnectionStatus {
 let tokenCache: { value: string; expiresAt: number } | undefined;
 
 function getFeishuConfig() {
+  const config = getFeishuRuntimeConfig();
   return {
-    appId: process.env.FEISHU_APP_ID?.trim() ?? "",
-    appSecret: process.env.FEISHU_APP_SECRET?.trim() ?? "",
-    baseUrl: (process.env.FEISHU_BASE_URL?.trim() || "https://open.feishu.cn/open-apis").replace(/\/$/, ""),
+    appId: config.appId,
+    appSecret: config.appSecret,
+    baseUrl: config.baseUrl.replace(/\/$/, ""),
   };
 }
 

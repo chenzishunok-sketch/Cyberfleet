@@ -110,6 +110,22 @@ function hasChuhaijiangConfiguration(): boolean {
   return getChuhaijiangRuntimeConfig().source !== "missing";
 }
 
+/** 换绑/解绑后调用：丢弃旧的 MCP 连接与工具缓存，下次使用时按新凭证重建 */
+export function resetChuhaijiangConnection(): void {
+  void transport?.close().catch(() => undefined);
+  client = null;
+  transport = null;
+  cachedTools = null;
+  connectPromise = null;
+}
+
+/** 连接测试探针：真实建连 + listTools（零消耗），失败抛出真实原因 */
+export async function probeChuhaijiangConnection(): Promise<number> {
+  if (!hasChuhaijiangConfiguration()) throw new Error("出海匠 API Key 尚未配置。");
+  await connectClient();
+  return cachedTools?.length ?? 0;
+}
+
 /** 获取出海匠只读工具定义（OpenAI function calling 格式） */
 export async function getChuhaijiangTools(): Promise<McpToolDefinition[]> {
   if (!hasChuhaijiangConfiguration()) return [];

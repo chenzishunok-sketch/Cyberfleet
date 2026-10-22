@@ -1,16 +1,20 @@
 import { chmod, readFile, writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import path, { join } from "node:path";
 import type {
   SkillDefinition,
   SkillStatus,
   SkillsCatalogResponse,
   SkillConfigField,
 } from "../shared/contracts.ts";
-import { getFastMossTools } from "./mcp-client.ts";
-import { getChuhaijiangTools } from "./chuhaijiang-client.ts";
+import { getFastMossTools, resetFastMossConnection } from "./mcp-client.ts";
+import { getChuhaijiangTools, resetChuhaijiangConnection } from "./chuhaijiang-client.ts";
+import { clearFeishuTokenCache } from "./feishu-client.ts";
 import {
   getChuhaijiangRuntimeConfig,
+  getFastMossRuntimeConfig,
+  getFeishuRuntimeConfig,
   getMiaoshouRuntimeConfig,
+  getTikTokAppRuntimeConfig,
   getTmapiRuntimeConfig,
   getWebSearchRuntimeConfig,
 } from "./runtime-config.ts";
@@ -26,7 +30,11 @@ const BUILTIN_SKILLS: SkillDefinition[] = [
     icon: "ShoppingBag",
     version: "1.0.0",
     category: "analytics",
-    configFields: [],
+    configFields: [
+      { key: "appKey", label: "App Key", type: "text", required: true, placeholder: "TikTok Shop Partner Center 的 App Key" },
+      { key: "appSecret", label: "App Secret", type: "password", required: true, placeholder: "TikTok Shop Partner Center 的 App Secret" },
+      { key: "serviceId", label: "Service ID", type: "text", required: false, placeholder: "应用市场服务 ID（纯数字），决定授权页；留空用默认" },
+    ],
     builtin: true,
     scenes: [
       "market", "analytics", "catalog", "global", "orders",
@@ -98,6 +106,35 @@ const BUILTIN_SKILLS: SkillDefinition[] = [
       "chuhaijiang_search", "chuhaijiang_detail", "chuhaijiang_related", "chuhaijiang_amazon",
     ],
   },
+  {
+    id: "feishu",
+    name: "飞书",
+    description: "飞书企业自建应用：DAG 审批与结果通知、定时日报推送、飞书消息机器人（长连接）。消息接收人（FEISHU_NOTIFY_CHAT_ID）仍在 .env 配置。",
+    icon: "MessageSquare",
+    version: "1.0.0",
+    category: "fulfillment",
+    configFields: [
+      { key: "appId", label: "App ID", type: "text", required: true, placeholder: "cli_ 开头的应用 ID" },
+      { key: "appSecret", label: "App Secret", type: "password", required: true, placeholder: "飞书开放平台应用密钥" },
+      { key: "baseUrl", label: "API 地址", type: "url", required: false, placeholder: "https://open.feishu.cn/open-apis" },
+    ],
+    builtin: true,
+    scenes: ["feishu_notify", "feishu_report", "feishu_bridge"],
+  },
+  {
+    id: "fastmoss",
+    name: "FastMoss 数据分析",
+    description: "FastMoss TikTok 数据分析 MCP：爆品、达人、店铺、直播、视频等数据分析工具，注入对话与选品流程。",
+    icon: "BarChartBig",
+    version: "1.0.0",
+    category: "analytics",
+    configFields: [
+      { key: "apiKey", label: "API Key", type: "password", required: true, placeholder: "FastMoss 数据平台 API Key" },
+      { key: "mcpUrl", label: "MCP 地址", type: "url", required: false, placeholder: "https://mcp.fastmoss.com/mcp" },
+    ],
+    builtin: true,
+    scenes: ["fastmoss_tools"],
+  },
 ];
 
 // ─── 持久化存储 ───────────────────────────────────────────────
@@ -113,7 +150,10 @@ interface SkillsStore {
 }
 
 const DATA_DIR = join(process.cwd(), ".data");
-const SKILLS_FILE = join(DATA_DIR, "skills.json");
+// 每次调用时解析（而非模块加载时固化），与 runtime-config 的 SKILLS_STORE 语义保持一致，测试隔离才生效
+function skillsFilePath(): string {
+  return process.env.SKILLS_STORE?.trim() || join(DATA_DIR, "skills.json");
+}
 
 // 内存缓存：对话流程每次都会调用 getEnabledSkills/getSkillTools，
 // 原实现每次都读盘 5+ 次 I/O。缓存后只有首次或写后才读盘。
@@ -125,7 +165,7 @@ async function readStore(): Promise<SkillsStore> {
   if (storeReadPromise) return storeReadPromise;
   storeReadPromise = (async () => {
     try {
-      const content = await readFile(SKILLS_FILE, "utf-8");
+      const content = await readFile(skillsFilePath(), "utf-8");
       cachedStore = JSON.parse(content) as SkillsStore;
     } catch {
       cachedStore = {};
@@ -141,10 +181,15 @@ async function writeStore(store: SkillsStore): Promise<void> {
   // 配置变更后清除能力描述和工具缓存，下次读取时重建
   cachedSkillTools = undefined;
   cachedAbilityDesc = undefined;
-  await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(SKILLS_FILE, JSON.stringify(store, null, 2), "utf-8");
+  // 连接器模块级缓存同步失效：换绑/解绑后下一条业务请求立即使用新凭证
+  clearFeishuTokenCache();
+  resetChuhaijiangConnection();
+  resetFastMossConnection();
+  const skillsFile = skillsFilePath();
+  await mkdir(path.dirname(skillsFile), { recursive: true });
+  await writeFile(skillsFile, JSON.stringify(store, null, 2), "utf-8");
   // skills.json 存有第三方密钥，权限与 tiktok-authorization.json 一致收敛为 0600
-  await chmod(SKILLS_FILE, 0o600).catch(() => undefined);
+  await chmod(skillsFile, 0o600).catch(() => undefined);
 }
 
 // ─── 核心逻辑 ─────────────────────────────────────────────────
@@ -187,14 +232,17 @@ export async function getSkillsCatalog(): Promise<SkillsCatalogResponse> {
     const stored = getStoredState(store, skill.id);
     const enabled = skill.builtin ? (storedEntry?.enabled !== false) : stored.enabled;
     if (skill.id === "tiktok-shop") {
+      const appConfig = getTikTokAppRuntimeConfig();
       return {
         id: skill.id,
         installed: true,
         enabled,
         configured: tiktokConnection.connected,
-        config: {},
+        config: maskConfig(skill, { appKey: appConfig.appKey, appSecret: appConfig.appSecret, serviceId: appConfig.serviceId }),
         connectionState: tiktokConnection.connected ? "connected" as const : "not_configured" as const,
-        configSource: tiktokConnection.connected ? "oauth" as const : "none" as const,
+        configSource: tiktokConnection.connected
+          ? "oauth" as const
+          : appConfig.source === "missing" ? "none" as const : appConfig.source,
       };
     }
     if (skill.id === "miaoshou") {
@@ -251,6 +299,34 @@ export async function getSkillsCatalog(): Promise<SkillsCatalogResponse> {
         config: maskConfig(skill, effectiveConfig),
         connectionState: configured ? "configured" as const : "not_configured" as const,
         configSource: chuhaijiangConfig.source === "missing" ? "none" as const : chuhaijiangConfig.source,
+      };
+    }
+    if (skill.id === "feishu") {
+      const feishuConfig = getFeishuRuntimeConfig();
+      const effectiveConfig = { appId: feishuConfig.appId, appSecret: feishuConfig.appSecret, baseUrl: feishuConfig.baseUrl };
+      const configured = isConfigured(skill, effectiveConfig);
+      return {
+        id: skill.id,
+        installed: true,
+        enabled,
+        configured,
+        config: maskConfig(skill, effectiveConfig),
+        connectionState: configured ? "configured" as const : "not_configured" as const,
+        configSource: feishuConfig.source === "missing" ? "none" as const : feishuConfig.source,
+      };
+    }
+    if (skill.id === "fastmoss") {
+      const fastMossConfig = getFastMossRuntimeConfig();
+      const effectiveConfig = { apiKey: fastMossConfig.apiKey, mcpUrl: fastMossConfig.mcpUrl };
+      const configured = isConfigured(skill, effectiveConfig);
+      return {
+        id: skill.id,
+        installed: true,
+        enabled,
+        configured,
+        config: maskConfig(skill, effectiveConfig),
+        connectionState: configured ? "configured" as const : "not_configured" as const,
+        configSource: fastMossConfig.source === "missing" ? "none" as const : fastMossConfig.source,
       };
     }
     return {
@@ -333,6 +409,21 @@ export async function disableSkill(skillId: string): Promise<SkillStatus> {
   };
 }
 
+/** 解绑：清除界面保存的配置，回落 .env（保留启用状态）；连接器缓存随 writeStore 一并失效 */
+export async function clearSkillConfig(skillId: string): Promise<void> {
+  const skill = BUILTIN_SKILLS.find((s) => s.id === skillId);
+  if (!skill) throw new Error(`未知 Skill：${skillId}`);
+  if (skillId === "tiktok-shop") throw new Error("TikTok 店铺请在「店铺绑定」区管理。");
+
+  const store = await readStore();
+  const entry = store[skillId];
+  if (!entry || Object.keys(entry.config ?? {}).length === 0) {
+    throw new Error("该服务没有界面保存的配置（当前生效的是 .env 配置，如需更换请在 .env 中修改）。");
+  }
+  store[skillId] = { ...getStoredState(store, skillId), config: {} };
+  await writeStore(store);
+}
+
 export async function updateSkillConfig(
   skillId: string,
   config: Record<string, string>,
@@ -344,6 +435,12 @@ export async function updateSkillConfig(
   const existingEntry = store[skillId];
   const current = getStoredState(store, skillId);
   let runtimeBaseline: Record<string, string> = {};
+  if (skillId === "tiktok-shop") {
+    const runtime = getTikTokAppRuntimeConfig();
+    if (runtime.source !== "missing" || runtime.serviceId) {
+      runtimeBaseline = { appKey: runtime.appKey, appSecret: runtime.appSecret, serviceId: runtime.serviceId };
+    }
+  }
   if (skillId === "miaoshou") {
     const runtime = getMiaoshouRuntimeConfig();
     if (runtime.source !== "missing") {
@@ -366,6 +463,18 @@ export async function updateSkillConfig(
     const runtime = getChuhaijiangRuntimeConfig();
     if (runtime.source !== "missing") {
       runtimeBaseline = { apiKey: runtime.apiKey, baseUrl: runtime.baseUrl };
+    }
+  }
+  if (skillId === "feishu") {
+    const runtime = getFeishuRuntimeConfig();
+    if (runtime.source !== "missing") {
+      runtimeBaseline = { appId: runtime.appId, appSecret: runtime.appSecret, baseUrl: runtime.baseUrl };
+    }
+  }
+  if (skillId === "fastmoss") {
+    const runtime = getFastMossRuntimeConfig();
+    if (runtime.source !== "missing") {
+      runtimeBaseline = { apiKey: runtime.apiKey, mcpUrl: runtime.mcpUrl };
     }
   }
   const filteredUpdates: Record<string, string> = Object.fromEntries(Object.entries(config).filter(([key, value]) => {
@@ -411,6 +520,8 @@ export async function getEnabledSkills(): Promise<EnabledSkillInfo[]> {
   const tmapiConfig = getTmapiRuntimeConfig();
   const webSearchConfig = getWebSearchRuntimeConfig();
   const chuhaijiangConfig = getChuhaijiangRuntimeConfig();
+  const feishuConfig = getFeishuRuntimeConfig();
+  const fastMossConfig = getFastMossRuntimeConfig();
   const tiktokConnection = await getTikTokConnectionStatus().catch(() => ({ connected: false as const }));
 
   for (const skill of BUILTIN_SKILLS) {
@@ -426,7 +537,11 @@ export async function getEnabledSkills(): Promise<EnabledSkillInfo[]> {
           ? { apiKey: webSearchConfig.apiKey, baseUrl: webSearchConfig.baseUrl }
           : skill.id === "chuhaijiang"
             ? { apiKey: chuhaijiangConfig.apiKey, baseUrl: chuhaijiangConfig.baseUrl }
-            : stored.config;
+            : skill.id === "feishu"
+              ? { appId: feishuConfig.appId, appSecret: feishuConfig.appSecret, baseUrl: feishuConfig.baseUrl }
+              : skill.id === "fastmoss"
+                ? { apiKey: fastMossConfig.apiKey, mcpUrl: fastMossConfig.mcpUrl }
+                : stored.config;
     const configured = skill.id === "tiktok-shop"
       ? tiktokConnection.connected
       : skill.configFields.length === 0 || isConfigured(skill, effectiveConfig);

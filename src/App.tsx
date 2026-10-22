@@ -1,12 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, LoaderCircle, X } from "lucide-react";
-import type { ActionPlanStatus, ChatImageAttachment, ChatMessage, DashboardSnapshot, RunStep, TikTokCapabilitiesResponse, SkillsCatalogResponse } from "../shared/contracts";
+import type { ActionPlanStatus, ChatImageAttachment, ChatMessage, DashboardSnapshot, RunStep, SkillsCatalogResponse } from "../shared/contracts";
 import { getDigitalEmployee, type AgentContext } from "../shared/digital-employees";
-import { api, type HealthResponse, type TikTokConnectionStatus } from "./api";
+import { api, type HealthResponse, type LlmProviderSummary, type LlmProvidersOverview, type TikTokConnectionStatus } from "./api";
 import { ChatWorkspace } from "./components/ChatWorkspace";
 import { ConversationManager } from "./components/ConversationManager";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AppPage } from "./components/Pages";
+import type { ConnectionWizardStep } from "./components/ConnectionWizard";
 import { Sidebar, type ViewId } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { chatStreaming } from "./streaming-store";
@@ -51,6 +52,15 @@ const PricingWorkspace = lazy(() =>
 );
 const SkillManager = lazy(() =>
   import("./components/SkillManager").then(({ SkillManager: Component }) => ({ default: Component })),
+);
+const ConnectionWizard = lazy(() =>
+  import("./components/ConnectionWizard").then(({ ConnectionWizard: Component }) => ({ default: Component })),
+);
+const LlmWizard = lazy(() =>
+  import("./components/LlmWizard").then(({ LlmWizard: Component }) => ({ default: Component })),
+);
+const ConnectorWizard = lazy(() =>
+  import("./components/ConnectorWizard").then(({ ConnectorWizard: Component }) => ({ default: Component })),
 );
 
 function initialMessage(snapshot: DashboardSnapshot): ChatMessage {
@@ -98,14 +108,17 @@ export default function App() {
   const [tiktokConnection, setTikTokConnection] = useState<TikTokConnectionStatus>({ status: "not_configured", connected: false });
   const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; text: string }>();
   const [dashboardError, setDashboardError] = useState<string>();
-  const [capabilities, setCapabilities] = useState<TikTokCapabilitiesResponse>();
-  const [capabilitiesError, setCapabilitiesError] = useState<string>();
-  const [selectedSceneId, setSelectedSceneId] = useState<string>();
   const [conversationManagerOpen, setConversationManagerOpen] = useState(false);
   const [managerProjectId, setManagerProjectId] = useState<string>();
   const [skillsCatalog, setSkillsCatalog] = useState<SkillsCatalogResponse>();
   const [skillsError, setSkillsError] = useState<string>();
   const [skillManagerOpen, setSkillManagerOpen] = useState(false);
+  const [connectionWizardOpen, setConnectionWizardOpen] = useState(false);
+  const [connectionWizardStep, setConnectionWizardStep] = useState<ConnectionWizardStep>("guide");
+  const [llmOverview, setLlmOverview] = useState<LlmProvidersOverview>();
+  const [llmWizardOpen, setLlmWizardOpen] = useState(false);
+  const [llmWizardEditing, setLlmWizardEditing] = useState<LlmProviderSummary>();
+  const [connectorWizardId, setConnectorWizardId] = useState<string>();
   const [pendingPrompt, setPendingPrompt] = useState<string>();
   const storageWarningShown = useRef(false);
 
@@ -126,17 +139,6 @@ export default function App() {
     }
   }, []);
 
-  const loadCapabilities = useCallback(async () => {
-    setCapabilitiesError(undefined);
-    try {
-      const result = await api.capabilities();
-      setCapabilities(result);
-      setSelectedSceneId((current) => result.scenes.some((scene) => scene.id === current) ? current : result.scenes[0]?.id);
-    } catch (error) {
-      setCapabilitiesError(error instanceof Error ? error.message : "无法加载 API 能力目录。");
-    }
-  }, []);
-
   const loadSkills = useCallback(async () => {
     setSkillsError(undefined);
     try {
@@ -148,17 +150,54 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    void loadWorkspace();
-  }, [loadWorkspace]);
+  const loadLlmProviders = useCallback(async () => {
+    try {
+      setLlmOverview(await api.llmProviders());
+    } catch (error) {
+      console.error("Failed to load LLM providers:", error);
+    }
+  }, []);
+
+  // 大模型保存/切换后：刷新概览 + 健康状态（缓存已由写请求失效）
+  const refreshLlm = useCallback(async () => {
+    await Promise.all([loadLlmProviders(), loadWorkspace()]);
+  }, [loadLlmProviders, loadWorkspace]);
+
+  // 业务接口绑定保存/测试后：刷新 Skill 目录 + 健康状态（妙手/TMAPI/飞书等连接状态在 health 中）
+  const refreshSkills = useCallback(async () => {
+    await Promise.all([loadSkills(), loadWorkspace()]);
+  }, [loadSkills, loadWorkspace]);
 
   useEffect(() => {
-    void loadCapabilities();
-  }, [loadCapabilities]);
+    void loadWorkspace();
+    // OAuth 回调经服务端中转页带 ?bind=tiktok&result=... 跳回前端：提示结果并清掉参数
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("bind") === "tiktok") {
+      const result = params.get("result");
+      window.history.replaceState({}, "", window.location.pathname);
+      if (result === "success") {
+        setToast({ tone: "success", text: "TikTok Shop 授权成功，新店铺已加入绑定列表。" });
+        void loadWorkspace();
+        // 授权返回了多个店铺且尚未选择时，自动打开向导的选择店铺步骤
+        void api.health().then((health) => {
+          if (health.tiktok.status === "shop_selection_required") {
+            setConnectionWizardStep("shop");
+            setConnectionWizardOpen(true);
+          }
+        }).catch(() => undefined);
+      } else if (result === "error") {
+        setToast({ tone: "error", text: "TikTok Shop 授权未完成，请在设置页重新发起授权。" });
+      }
+    }
+  }, [loadWorkspace]);
 
   useEffect(() => {
     void loadSkills();
   }, [loadSkills]);
+
+  useEffect(() => {
+    void loadLlmProviders();
+  }, [loadLlmProviders]);
 
   useEffect(() => {
     if (!conversationState) return;
@@ -339,13 +378,12 @@ export default function App() {
     }
   }, []);
 
-  const selectTikTokShop = async (shopId: string) => {
+  const selectTikTokShop = async (shopId: string, grantId?: string) => {
     try {
-      const result = await api.selectTikTokShop(shopId);
+      const result = await api.selectTikTokShop(shopId, grantId);
       setTikTokConnection(result.tiktok);
       setConnections((current) => ({ ...current, tiktok: result.tiktok.connected }));
       const refreshed = await loadWorkspace();
-      void loadCapabilities();
       if (refreshed) {
         setToast({ tone: "success", text: `已切换到 ${result.tiktok.shopName ?? "TikTok Shop 店铺"}，数据已刷新。` });
       } else {
@@ -354,6 +392,37 @@ export default function App() {
     } catch (error) {
       setToast({ tone: "error", text: error instanceof Error ? error.message : "选择店铺失败。" });
     }
+  };
+
+  const unbindTikTokBinding = async (grantId: string) => {
+    try {
+      await api.unbindTikTokBinding(grantId);
+      const refreshed = await loadWorkspace();
+      setToast(refreshed
+        ? { tone: "success", text: "绑定已解除，该账号的本地授权令牌已删除。" }
+        : { tone: "info", text: "绑定已解除，但页面数据刷新失败，请手动重试。" });
+    } catch (error) {
+      setToast({ tone: "error", text: error instanceof Error ? error.message : "解绑失败。" });
+    }
+  };
+
+  const openBindingWizard = () => {
+    setConnectionWizardStep("guide");
+    setConnectionWizardOpen(true);
+  };
+
+  const openAddLlmWizard = () => {
+    setLlmWizardEditing(undefined);
+    setLlmWizardOpen(true);
+  };
+
+  const openEditLlmWizard = (provider: LlmProviderSummary) => {
+    setLlmWizardEditing(provider);
+    setLlmWizardOpen(true);
+  };
+
+  const openConnectorWizard = (skillId: string) => {
+    setConnectorWizardId(skillId);
   };
 
   const newConversation = (projectId?: string, workspace: ConversationWorkspace = "general") => {
@@ -514,14 +583,15 @@ export default function App() {
             onToggleAutomation={toggleAutomation}
             onOpenChat={openChat}
             onSelectTikTokShop={selectTikTokShop}
-            capabilities={capabilities}
-            capabilitiesError={capabilitiesError}
-            selectedSceneId={selectedSceneId}
-            onSceneSelect={setSelectedSceneId}
+            onBindNewShop={openBindingWizard}
+            onUnbindBinding={unbindTikTokBinding}
+            llmOverview={llmOverview}
+            onLlmChanged={refreshLlm}
+            onAddLlmProvider={openAddLlmWizard}
+            onEditLlmProvider={openEditLlmWizard}
             skillsCatalog={skillsCatalog}
-            skillsError={skillsError}
-            onRetrySkills={loadSkills}
-            onOpenSkillManager={() => setSkillManagerOpen(true)}
+            onSkillsChanged={refreshSkills}
+            onOpenConnectorWizard={openConnectorWizard}
             onOpenConversationManager={() => openConversationManager()}
           />
         )}
@@ -556,6 +626,46 @@ export default function App() {
         />
         </Suspense>
       )}
+      {connectionWizardOpen && (
+        <Suspense fallback={<div />}>
+          <ConnectionWizard
+            initialStep={connectionWizardStep}
+            onClose={() => setConnectionWizardOpen(false)}
+            tiktokConnection={tiktokConnection}
+            demoMode={dashboard.dataSource === "demo"}
+            onRefresh={async () => {
+              await loadWorkspace();
+            }}
+            onSelectTikTokShop={selectTikTokShop}
+          />
+        </Suspense>
+      )}
+      {llmWizardOpen && (
+        <Suspense fallback={<div />}>
+          <LlmWizard
+            editing={llmWizardEditing}
+            demoMode={dashboard.dataSource === "demo"}
+            onClose={() => setLlmWizardOpen(false)}
+            onSaved={refreshLlm}
+          />
+        </Suspense>
+      )}
+      {connectorWizardId && skillsCatalog && (() => {
+        const skill = skillsCatalog.skills.find((item) => item.id === connectorWizardId);
+        const skillStatus = skillsCatalog.statuses.find((item) => item.id === connectorWizardId);
+        if (!skill || !skillStatus) return null;
+        return (
+          <Suspense fallback={<div />}>
+            <ConnectorWizard
+              skill={skill}
+              status={skillStatus}
+              demoMode={dashboard.dataSource === "demo"}
+              onClose={() => setConnectorWizardId(undefined)}
+              onSaved={refreshSkills}
+            />
+          </Suspense>
+        );
+      })()}
       {toast && <div className={`toast toast--${toast.tone}`}>{toast.tone === "success" ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}<span>{toast.text}</span><button aria-label="关闭" onClick={() => setToast(undefined)}><X size={15} /></button></div>}
     </div>
   );

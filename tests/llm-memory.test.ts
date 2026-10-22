@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { extractMemories } from "../server/llm.ts";
 
@@ -9,8 +9,15 @@ function mockLlmContent(content: unknown) {
 }
 
 describe("LLM memory extraction", () => {
+  // callLlmRaw 在缺少模型配置时会直接抛错（不再发出无凭证请求），这里补齐配置
+  beforeEach(() => {
+    vi.stubEnv("LLM_API_KEY", "test-llm-key");
+    vi.stubEnv("LLM_MODEL", "test-llm-model");
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it("accepts only the documented string format", async () => {
