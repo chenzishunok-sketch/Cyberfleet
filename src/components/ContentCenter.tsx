@@ -15,6 +15,7 @@ import {
   XCircle,
 } from "lucide-react";
 import type { ContentAsset, ContentAssetType, ContentOverview, ContentTask } from "../../shared/content";
+import { AGNES_IMAGE_MODEL, contentImageDimensions } from "../../shared/content";
 import { api } from "../api";
 
 export type ContentSection = "create" | "assets" | "tasks";
@@ -243,7 +244,11 @@ export function ContentCenter({ section }: ContentCenterProps) {
                   <label><span>语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option>泰语</option><option>中文</option><option>英语</option></select></label>
                 </> : <>
                   <label><span>比例</span><select value={ratio} onChange={(event) => setRatio(event.target.value)}>{(mode === "image" ? ["1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "21:9"] : ["9:16", "16:9", "1:1", "4:3", "3:4"]).map((item) => <option key={item}>{item}</option>)}</select></label>
-                  {mode === "image" ? <label><span>清晰度</span><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}>{["1K", "2K", "3K", "4K"].map((item) => <option key={item}>{item}</option>)}</select></label> : <>
+                  {mode === "image" ? <>
+                    <label><span>图片模型</span><span>{AGNES_IMAGE_MODEL}</span></label>
+                    <label><span>清晰度</span><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}>{["1K", "2K", "3K", "4K"].map((item) => <option key={item}>{item}</option>)}</select></label>
+                    <span>{contentImageDimensions(ratio, imageSize)} 像素</span>
+                  </> : <>
                     <label><span>画质</span><select value={resolution} onChange={(event) => setResolution(event.target.value)}>{["480p", "720p", "1080p"].map((item) => <option key={item}>{item}</option>)}</select></label>
                     <label><span>时长</span><select value={duration} onChange={(event) => setDuration(Number(event.target.value))}>{[3, 5, 10, 18].map((item) => <option key={item} value={item}>{item} 秒</option>)}</select></label>
                   </>}

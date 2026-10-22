@@ -1924,8 +1924,8 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
         }
       };
       const { finalDecision, steps } = await reactLoop(request, toolExecutor, agentContext, 5, emit
-        ? (decision, observation, index) => {
-            emit({ type: "step", step: { id: `react-${index}`, label: toolLabel(decision.tool), detail: observation.slice(0, 60) + (observation.length > 60 ? "..." : ""), status: "done" } });
+        ? (decision, observation, index, failed) => {
+            emit({ type: "step", step: { id: `react-${index}`, label: toolLabel(decision.tool), detail: observation.slice(0, 60) + (observation.length > 60 ? "..." : ""), status: failed ? "failed" : "done" } });
           }
         : undefined, emit
         ? (delta) => emit({ type: "content_delta", delta })
@@ -1949,7 +1949,7 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
             id: `react-${i}`,
             label: toolLabel(s.decision.tool),
             detail: s.observation.slice(0, 60) + (s.observation.length > 60 ? "..." : ""),
-            status: "done" as const,
+            status: s.failed ? "failed" as const : "done" as const,
           }));
         if (reactSteps.length) {
           responseMessage.steps = [...reactSteps, ...(responseMessage.steps ?? [])];

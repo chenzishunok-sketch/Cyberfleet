@@ -249,6 +249,10 @@ async function parseJsonResponse<T>(response: Response, schema: z.ZodType<T>, la
 async function requestToken(parameters: Record<string, string>): Promise<TikTokTokenData> {
   const { appKey, appSecret } = requireAppCredentials();
   const url = new URL(process.env.TIKTOK_SHOP_TOKEN_URL ?? DEFAULT_TIKTOK_TOKEN_URL);
+  // 换取授权码与刷新令牌是两个端点，刷新不能继续请求 /token/get。
+  if (parameters.grant_type === "refresh_token") {
+    url.pathname = url.pathname.replace(/\/token\/get\/?$/, "/token/refresh");
+  }
   url.searchParams.set("app_key", appKey);
   url.searchParams.set("app_secret", appSecret);
   for (const [key, value] of Object.entries(parameters)) url.searchParams.set(key, value);

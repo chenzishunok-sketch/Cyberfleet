@@ -7,6 +7,7 @@ import {
   bindingsStorePath,
   completeTikTokAuthorization,
   createTikTokAuthorizationUrl,
+  getAuthorizedTikTokClient,
   getTikTokConnectionStatus,
   listBindings,
   readBindings,
@@ -199,6 +200,29 @@ describe("TikTok multi-store bindings", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("refreshes expired tokens through token/refresh and persists rotated credentials", async () => {
+    await authorizeRound({ code: "code-expired", token: sellerToken(), shops: [shop("shop-jp", "Cashio", "JP", "cipher-jp")] });
+    const store = await readBindings();
+    store.grants[0].accessTokenExpiresAt = now - 100;
+    await writeFile(bindingsStorePath(), JSON.stringify(store));
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      expect(url.origin).toBe("https://auth.tiktok-shops.com");
+      expect(url.pathname).toBe("/api/v2/token/refresh");
+      expect(url.searchParams.get("grant_type")).toBe("refresh_token");
+      expect(url.searchParams.get("refresh_token")).toBe("refresh-a1");
+      expect(url.searchParams.has("auth_code")).toBe(false);
+      return new Response(JSON.stringify({ code: 0, data: sellerToken({ access_token: "access-new", refresh_token: "refresh-new" }) }));
+    });
+    // 并发读取共享一次刷新，不能重复轮换令牌。
+    const clients = await Promise.all([getAuthorizedTikTokClient(), getAuthorizedTikTokClient()]);
+    expect(clients.every(Boolean)).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((await readBindings()).grants[0]).toMatchObject({ accessToken: "access-new", refreshToken: "refresh-new" });
+    await getAuthorizedTikTokClient();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("derives per-binding token status without network calls", async () => {

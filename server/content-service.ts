@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ContentAsset, ContentOverview, ContentTask } from "../shared/content.ts";
+import { AGNES_IMAGE_MODEL, contentImageDimensions } from "../shared/content.ts";
 import { generateContentText } from "./llm.ts";
 import { getLlmRuntimeConfig } from "./llm-providers.ts";
 import { createAgnesVideo, generateAgnesImage, getAgnesVideo, hasAgnesConfiguration } from "./agnes-client.ts";
@@ -61,11 +62,11 @@ export async function createTextContent(input: CommonInput & { kind: "title" | "
 }
 
 export async function createImageContent(input: CommonInput & { ratio: string; size: string; images?: string[] }): Promise<{ task: ContentTask; asset: ContentAsset }> {
-  const task = createTask("image", input, { ratio: input.ratio, size: input.size, references: input.images?.length ?? 0 });
+  const task = createTask("image", input, { model: AGNES_IMAGE_MODEL, ratio: input.ratio, size: input.size, dimensions: contentImageDimensions(input.ratio, input.size), references: input.images?.length ?? 0 });
   try {
     const result = await generateAgnesImage(input);
     updateTask(task, { progress: 80 });
-    const asset = await saveRemoteAsset({ ...input, type: "image", sourceUrl: result.url, model: "agnes-image-2.1-flash" });
+    const asset = await saveRemoteAsset({ ...input, type: "image", sourceUrl: result.url, model: AGNES_IMAGE_MODEL });
     return { task: updateTask(task, { status: "completed", progress: 100, assetId: asset.id }), asset };
   } catch (error) {
     updateTask(task, { status: "failed", progress: 100, error: error instanceof Error ? error.message : "图片生成失败。" });

@@ -338,6 +338,7 @@ const tools = [
 interface ReactStepResult {
   decision: AgentDecision;
   observation: string;
+  failed?: boolean;
 }
 
 export type ToolExecutorFn = (decision: AgentDecision) => Promise<string>;
@@ -648,7 +649,7 @@ export async function reactLoop(
   toolExecutor: ToolExecutorFn,
   memoryContext?: string,
   maxSteps = 5,
-  onStep?: (decision: AgentDecision, observation: string, index: number) => void,
+  onStep?: (decision: AgentDecision, observation: string, index: number, failed: boolean) => void,
   onToken?: (delta: string) => void,
 ): Promise<{ finalDecision: AgentDecision; steps: ReactStepResult[] }> {
   const memory = memoryContext ?? "";
@@ -705,13 +706,15 @@ export async function reactLoop(
     const observations = await Promise.all(allCalls.map(async (call) => {
       const callDecision = { tool: call.name as AgentDecision["tool"], args: call.args } as AgentDecision;
       let observation: string;
+      let failed = false;
       try {
         observation = await toolExecutor(callDecision);
       } catch (error) {
+        failed = true;
         observation = `工具执行出错：${error instanceof Error ? error.message : "未知错误"}。请告知用户并建议替代方案。`;
       }
-      steps.push({ decision: callDecision, observation });
-      onStep?.(callDecision, observation, steps.length - 1);
+      steps.push({ decision: callDecision, observation, failed });
+      onStep?.(callDecision, observation, steps.length - 1, failed);
       messages.push({
         role: "tool",
         tool_call_id: call.callId,

@@ -1,3 +1,5 @@
+import { AGNES_IMAGE_MODEL, contentImageDimensions } from "../shared/content.ts";
+
 const DEFAULT_BASE_URL = "https://apihub.agnes-ai.com";
 
 interface AgnesImageResult { url: string }
@@ -6,21 +8,22 @@ interface AgnesVideoTask { id: string; status: "queued" | "in_progress" | "compl
 function configuration() {
   const apiKey = process.env.AGNES_API_KEY?.trim();
   if (!apiKey) throw new Error("Agnes API 密钥尚未配置。");
-  return { apiKey, baseUrl: (process.env.AGNES_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/$/, "") };
+  return { apiKey, baseUrl: (process.env.AGNES_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, "").replace(/\/v1$/, "") };
 }
 
-async function request(path: string, init: RequestInit): Promise<Record<string, unknown>> {
+async function request(path: string, init: RequestInit, timeoutMs = 120_000): Promise<Record<string, unknown>> {
   const { apiKey, baseUrl } = configuration();
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", ...(init.headers ?? {}) },
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await response.text();
   let body: Record<string, unknown> = {};
   try { body = JSON.parse(text) as Record<string, unknown>; } catch { /* handled below */ }
   if (!response.ok) {
-    const detail = String(body.error ?? body.message ?? text).slice(0, 400);
+    const error = body.error;
+    const detail = String(error && typeof error === "object" ? (error as { message?: unknown }).message ?? body.message ?? "未知错误" : error ?? body.message ?? text).slice(0, 400);
     throw new Error(`Agnes 请求失败（${response.status}）：${detail || "未知错误"}`);
   }
   return body;
@@ -34,18 +37,19 @@ export async function generateAgnesImage(input: { prompt: string; ratio: string;
   const body = await request("/v1/images/generations", {
     method: "POST",
     body: JSON.stringify({
-      model: "agnes-image-2.1-flash",
+      model: AGNES_IMAGE_MODEL,
       prompt: input.prompt,
-      size: input.size,
-      ratio: input.ratio,
+      size: contentImageDimensions(input.ratio, input.size),
       extra_body: {
         response_format: "url",
         ...(input.images?.length ? { image: input.images } : {}),
       },
     }),
-  });
+  }, 360_000);
   const data = Array.isArray(body.data) ? body.data[0] as Record<string, unknown> | undefined : undefined;
-  const url = typeof data?.url === "string" ? data.url : typeof body.url === "string" ? body.url : undefined;
+  const url = typeof data?.url === "string" && data.url ? data.url
+    : typeof data?.b64_json === "string" && data.b64_json ? `data:image/png;base64,${data.b64_json}`
+    : typeof body.url === "string" && body.url ? body.url : undefined;
   if (!url) throw new Error("Agnes 图片生成成功，但没有返回图片地址。");
   return { url };
 }

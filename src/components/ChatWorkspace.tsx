@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode } from "react";
-import { ArrowRight, ArrowUp, ArrowUpRight, BarChart3, CheckCircle2, ChevronDown, CircleDollarSign, ClipboardCheck, ImagePlus, LoaderCircle, PackageSearch, Percent, Square, Workflow, X } from "lucide-react";
-import type { ChatImageAttachment, ChatMessage } from "../../shared/contracts";
+import { ArrowRight, ArrowUp, ArrowUpRight, BarChart3, CheckCircle2, ChevronDown, CircleDollarSign, ClipboardCheck, ImagePlus, LoaderCircle, PackageSearch, Percent, Square, Workflow, X, XCircle } from "lucide-react";
+import type { ChatImageAttachment, ChatMessage, RunStep } from "../../shared/contracts";
 import { getDigitalEmployee, type AgentContext } from "../../shared/digital-employees";
 import { useChatStreaming } from "../streaming-store";
 import { ArtifactRenderer } from "./ArtifactRenderer";
@@ -99,6 +99,23 @@ const StructuredMessageText = memo(function StructuredMessageText({ content }: {
   return <div className="message-copy">{nodes}</div>;
 });
 
+function RunSteps({ steps, open }: { steps: RunStep[]; open?: boolean }) {
+  const completed = steps.filter((step) => step.status === "done").length;
+  const failed = steps.filter((step) => step.status === "failed").length;
+  const SummaryIcon = failed ? XCircle : CheckCircle2;
+  return (
+    <details className="run-steps" open={open}>
+      <summary><SummaryIcon size={15} />已完成 {completed} 个步骤{failed > 0 ? `，失败 ${failed} 个步骤` : ""}<ChevronDown size={14} /></summary>
+      <div className="step-list">
+        {steps.map((step) => {
+          const Icon = step.status === "failed" ? XCircle : step.status === "done" ? CheckCircle2 : LoaderCircle;
+          return <div className="step-row" key={step.id}><span className={step.status === "failed" ? "step-error" : "step-check"}><Icon size={14} /></span><span>{step.label}</span><small>{step.detail.replace(/。请告知用户并建议替代方案。$/, "。")}</small></div>;
+        })}
+      </div>
+    </details>
+  );
+}
+
 function isConnectionNotice(message: ChatMessage): boolean {
   return message.role === "assistant"
     && message.content.startsWith("已连接真实店铺 ")
@@ -112,6 +129,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({ messages, sending, co
   const [draggingImage, setDraggingImage] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const composingRef = useRef(false);
   const nearBottomRef = useRef(true);
   const streaming = useChatStreaming(conversationId);
   const streamingSteps = streaming?.steps;
@@ -210,7 +228,11 @@ export const ChatWorkspace = memo(function ChatWorkspace({ messages, sending, co
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onPaste={handlePaste}
+          onCompositionStart={() => { composingRef.current = true; }}
+          onCompositionEnd={() => { composingRef.current = false; }}
           onKeyDown={(event) => {
+            // 中文输入法的回车用于确认候选词；部分浏览器只通过 keyCode 229 标识。
+            if (composingRef.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               submit();
@@ -284,12 +306,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({ messages, sending, co
                 ? <StructuredMessageText content={chatMessage.content} />
                 : <div className="message-copy">{chatMessage.content}</div>}
               {chatMessage.steps && (
-                <details className="run-steps">
-                  <summary><CheckCircle2 size={15} />已完成 {chatMessage.steps.length} 个步骤<ChevronDown size={14} /></summary>
-                  <div className="step-list">
-                    {chatMessage.steps.map((step) => <div className="step-row" key={step.id}><span className="step-check"><CheckCircle2 size={14} /></span><span>{step.label}</span><small>{step.detail}</small></div>)}
-                  </div>
-                </details>
+                <RunSteps steps={chatMessage.steps} />
               )}
               {chatMessage.artifact && (
                 <ArtifactRenderer
@@ -326,14 +343,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({ messages, sending, co
                 <div className="agent-working"><LoaderCircle size={16} className="spin" /><span>{employee.workingLabel}</span></div>
               )}
               {streamingSteps && streamingSteps.length > 0 && (
-                <details className="run-steps" open>
-                  <summary><CheckCircle2 size={15} />已完成 {streamingSteps.length} 个步骤<ChevronDown size={14} /></summary>
-                  <div className="step-list">
-                    {streamingSteps.map((step) => (
-                      <div className="step-row" key={step.id}><span className="step-check"><CheckCircle2 size={14} /></span><span>{step.label}</span><small>{step.detail}</small></div>
-                    ))}
-                  </div>
-                </details>
+                <RunSteps steps={streamingSteps} open />
               )}
             </div>
           </article>

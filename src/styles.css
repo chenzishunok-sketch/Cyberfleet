@@ -1089,6 +1089,10 @@ button:disabled {
   color: var(--green);
 }
 
+.step-error {
+  color: #c43d3d;
+}
+
 .agent-working {
   display: inline-flex;
   align-items: center;
