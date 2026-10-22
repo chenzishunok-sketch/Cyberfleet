@@ -78,7 +78,37 @@ function decodeImage(attachment: ChatImageAttachment): { bytes: Uint8Array; mime
   return { bytes: new Uint8Array(buffer), mimeType: match[1] };
 }
 
-type TemporaryUploadKind = "raw" | "uguu";
+// TMAPI 转链接口限制图片 ≤ 300KB（超限报 "Image too large"），留安全边距取 280KB。
+const TMAPI_IMAGE_LIMIT_BYTES = 280 * 1024;
+
+/**
+ * 把图片压到 TMAPI 接受的大小以内：最长边缩到 1200px 后按 JPEG 重编码，
+ * 质量从 82 逐级降到 50，仍超限再缩边长。商品主图常为 800KB~2MB，不压缩必然被 422 拒绝。
+ */
+async function compressImageForTmapi(bytes: Uint8Array, mimeType: string): Promise<{ bytes: Uint8Array; mimeType: string }> {
+  if (bytes.byteLength <= TMAPI_IMAGE_LIMIT_BYTES) return { bytes, mimeType };
+  const sharp = (await import("sharp")).default;
+  let maxEdge = 1200;
+  for (let quality = 82; quality >= 50; quality -= 8) {
+    const encoded = await sharp(Buffer.from(bytes), { failOn: "none" })
+      .rotate()
+      .resize(maxEdge, maxEdge, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality, mozjpeg: true })
+      .toBuffer();
+    if (encoded.byteLength <= TMAPI_IMAGE_LIMIT_BYTES) {
+      return { bytes: new Uint8Array(encoded), mimeType: "image/jpeg" };
+    }
+    if (quality - 8 < 50) maxEdge = Math.max(640, Math.round(maxEdge * 0.7));
+  }
+  // 理论上到不了这里；兜底再压一次最小档
+  const fallback = await sharp(Buffer.from(bytes), { failOn: "none" })
+    .resize(640, 640, { fit: "inside" })
+    .jpeg({ quality: 50 })
+    .toBuffer();
+  return { bytes: new Uint8Array(fallback), mimeType: "image/jpeg" };
+}
+
+type TemporaryUploadKind = "raw" | "uguu" | "litterbox";
 
 interface TemporaryUploadProvider {
   name: string;
@@ -99,13 +129,19 @@ function temporaryUploadProviders(): TemporaryUploadProvider[] {
     }
     providers.push({ name: "自定义图片通道", endpoint: configured, kind, attempts: 1 });
   }
-  providers.push({ name: "图片直传通道", endpoint: "https://paste.c-net.org/", kind: "raw", attempts: 1 });
-  providers.push({ name: "备用临时图片通道", endpoint: "https://uguu.se/upload.php", kind: "uguu", attempts: 2 });
+  // litterbox 是唯一实测「本机可上传且 TMAPI 服务器可达」的通道（2026-10-23 验证）：
+  // paste.c-net.org / uguu.se 能传上去，但 TMAPI 侧拉取超时（422 Image URL request timed out），
+  // 因为它们是境外小众图床。TMAPI 自带的 1688/tools/image/upload 目前「Service under maintenance」。
+  providers.push({ name: "图片直传通道", endpoint: "https://litterbox.catbox.moe/resources/internals/api.php", kind: "litterbox", attempts: 2 });
+  providers.push({ name: "备用临时图片通道", endpoint: "https://paste.c-net.org/", kind: "raw", attempts: 1 });
+  providers.push({ name: "备用临时图片通道2", endpoint: "https://uguu.se/upload.php", kind: "uguu", attempts: 2 });
   return providers.filter((provider, index, all) => all.findIndex((item) => item.endpoint === provider.endpoint) === index);
 }
 
 async function uploadTemporaryImage(attachment: ChatImageAttachment, provider: TemporaryUploadProvider): Promise<string> {
-  const { bytes, mimeType } = decodeImage(attachment);
+  const decoded = decodeImage(attachment);
+  // TMAPI 限制 ≤300KB，超限先压缩
+  const { bytes, mimeType } = await compressImageForTmapi(decoded.bytes, decoded.mimeType);
   const imageBuffer = new Uint8Array(bytes.byteLength);
   imageBuffer.set(bytes);
   let response: Response;
@@ -117,6 +153,12 @@ async function uploadTemporaryImage(attachment: ChatImageAttachment, provider: T
         body: imageBuffer,
         signal: AbortSignal.timeout(30_000),
       });
+    } else if (provider.kind === "litterbox") {
+      const form = new FormData();
+      form.set("reqtype", "fileupload");
+      form.set("time", "24h");
+      form.set("fileToUpload", new Blob([imageBuffer.buffer], { type: mimeType }), attachment.name || "sourcing-image.jpg");
+      response = await fetch(provider.endpoint, { method: "POST", body: form, signal: AbortSignal.timeout(60_000) });
     } else {
       const form = new FormData();
       form.set("files[]", new Blob([imageBuffer.buffer], { type: mimeType }), attachment.name || "sourcing-image.jpg");
@@ -126,6 +168,11 @@ async function uploadTemporaryImage(attachment: ChatImageAttachment, provider: T
     throw new Error(`${provider.name}上传失败：${error instanceof Error ? error.message : "网络异常"}`);
   }
   if (provider.kind === "raw") {
+    const url = (await response.text()).trim();
+    if (!response.ok || !/^https?:\/\//i.test(url)) throw new Error(`${provider.name}没有返回可访问的图片链接。`);
+    return url;
+  }
+  if (provider.kind === "litterbox") {
     const url = (await response.text()).trim();
     if (!response.ok || !/^https?:\/\//i.test(url)) throw new Error(`${provider.name}没有返回可访问的图片链接。`);
     return url;
