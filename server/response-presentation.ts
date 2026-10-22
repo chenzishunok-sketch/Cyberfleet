@@ -15,8 +15,9 @@ function cleanInlineMarkdown(value: string): string {
  * 空输入返回空串——需要「空就替代」的调用方自己给兜底文案。
  * 之前它直接返回占位句，结果这个占位句被当成"用户问题"塞进了别的模板里。
  */
-export function normalizeAssistantText(input: string): string {
-  const source = input.replace(/\r\n?/g, "\n").replace(/```[^\n]*\n?/g, "");
+export function normalizeAssistantText(input: string | undefined | null): string {
+  // 上游（LLM respond 参数等）可能传来 undefined/null，这里必须兜底，否则 .replace 直接崩
+  const source = String(input ?? "").replace(/\r\n?/g, "\n").replace(/```[^\n]*\n?/g, "");
   const output: string[] = [];
   let listIndex = 0;
 

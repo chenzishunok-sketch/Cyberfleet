@@ -1205,7 +1205,9 @@ async function composeLiveNarrative(data: TikTokOperationalData, originalText: s
 
 async function renderLiveDecision(decision: AgentDecision, originalText: string): Promise<ChatMessage> {
   if (decision.tool === "respond") {
-    const content = decision.args.content;
+    // LLM 偶发返回不带 content 的 respond 调用（content 为 undefined），
+    // 直接传下去会在文本清洗时触发 "Cannot read properties of undefined (reading 'replace')"
+    const content = typeof decision.args.content === "string" ? decision.args.content : "";
     const followUps = cleanFollowUps(decision.args.followUps ?? [], originalText);
     // respond 不携带 artifact，使用空 artifact 但仍触发质量检查
     return message(content, undefined, undefined, followUps, originalText);
