@@ -2,6 +2,7 @@ import express from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { installAuthGate } from "./auth-gate.ts";
 import type { ChatRequest, MessageArtifact, SkuPricingRecord } from "../shared/contracts.ts";
 import { AGENT_CONTEXTS, type AgentContext } from "../shared/digital-employees.ts";
 import { dashboard } from "./data.ts";
@@ -274,11 +275,20 @@ export function createApp() {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "20mb" }));
+  // 登录表单以 application/x-www-form-urlencoded 提交
+  app.use(express.urlencoded({ extended: false }));
 
-  // 前端构建产物目录：存在时由 API 服务同端口托管（生产/云端单端口模式）
-  const webDistDir = process.env.WEB_DIST?.trim() || path.resolve(process.cwd(), "dist");
-  const distIndex = path.join(webDistDir, "index.html");
-  const webIndexFile = fs.existsSync(distIndex) ? distIndex : undefined;
+  // 访问口令门：仅在设置了 APP_PASSWORD 时启用，未设置则完全跳过（本地开发无影响）。
+  // 必须早于业务路由与静态资源注册，才能拦住所有入口。
+  installAuthGate(app);
+
+  // 前端构建产物目录：仅生产模式（或显式指定 WEB_DIST）时同端口托管前端。
+  // 开发模式刻意不托管，避免打开 8795 看到旧的 dist 误以为代码已生效。
+  const webDistDir = process.env.WEB_DIST?.trim()
+    || (process.env.NODE_ENV === "production" ? path.resolve(process.cwd(), "dist") : undefined);
+  const webIndexFile = webDistDir && fs.existsSync(path.join(webDistDir, "index.html"))
+    ? path.join(webDistDir, "index.html")
+    : undefined;
 
   // health 端点短缓存：前端轮询频繁，连接状态无需实时计算（5s TTL）
   let healthCache: { at: number; payload: unknown } | undefined;
@@ -1436,7 +1446,7 @@ export function createApp() {
 
   // 生产单端口：若存在前端构建产物（npm run build 生成的 dist），由本服务直接托管，
   // 不再依赖 Vite dev server。云托管/演示环境只需要暴露一个端口。
-  if (webIndexFile) {
+  if (webIndexFile && webDistDir) {
     app.use(express.static(webDistDir, { index: false, maxAge: "1h" }));
     app.use((request, response, next) => {
       if (request.method !== "GET" && request.method !== "HEAD") return next();
