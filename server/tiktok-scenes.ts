@@ -53,7 +53,7 @@ interface ApiEnvelope {
 }
 
 const REGION_TIMEZONES: Record<string, string> = {
-  TH: "Asia/Bangkok",
+  JP: "Asia/Tokyo",
   US: "America/Los_Angeles",
   GB: "Europe/London",
   SG: "Asia/Singapore",
@@ -61,7 +61,6 @@ const REGION_TIMEZONES: Record<string, string> = {
   PH: "Asia/Manila",
   VN: "Asia/Ho_Chi_Minh",
   ID: "Asia/Jakarta",
-  JP: "Asia/Tokyo",
 };
 
 export function inferTikTokSceneQuery(text: string): TikTokSceneQuery | undefined {
@@ -128,7 +127,8 @@ function dateInTimezone(timestamp: number, timezone: string): string {
 }
 
 function timeRange(days: number, region?: string) {
-  const timezone = REGION_TIMEZONES[region ?? ""] ?? "UTC";
+  // 未指定站点时用东京时区：项目只做日本站，回落 UTC 会让日界偏移 9 小时
+  const timezone = REGION_TIMEZONES[region ?? ""] ?? REGION_TIMEZONES.JP;
   const today = dateInTimezone(Date.now(), timezone);
   const date = shiftDate(today, -1);
   const normalizedDays = days <= 1 ? 1 : days <= 7 ? 7 : 30;
@@ -226,7 +226,7 @@ function selectedRegion(authorization: Awaited<ReturnType<typeof readStoredAutho
 }
 
 const REGION_LABELS: Record<string, string> = {
-  TH: "泰国",
+  JP: "日本",
   US: "美国",
   GB: "英国",
   SG: "新加坡",
@@ -234,7 +234,6 @@ const REGION_LABELS: Record<string, string> = {
   PH: "菲律宾",
   VN: "越南",
   ID: "印尼",
-  JP: "日本",
 };
 
 function entityId(text: string): string | undefined {
@@ -247,7 +246,10 @@ function trackingNumber(text: string): string | undefined {
 
 function latestAvailableDate(error: unknown): string | undefined {
   if (!(error instanceof Error)) return undefined;
-  return error.message.match(/latest available date is (\d{4}-\d{2}-\d{2})/i)?.[1];
+  // TikTok 在不同接口上有两种措辞，两种都要认：
+  //   1) "... the latest available date is 2026-10-21"
+  //   2) "date must be on or before 2026-10-21. Use a date no later than the stated latest available date and retry."
+  return error.message.match(/(?:latest available date is|must be on or before)\s*(\d{4}-\d{2}-\d{2})/i)?.[1];
 }
 
 // ─── 数据驱动摘要生成器：基于真实榜单数据产出有价值的洞察，而非占位回答
@@ -262,7 +264,7 @@ function pickRecordField(record: Record<string, unknown>, keys: string[]): unkno
 
 function parseGmvLower(rangeStr: unknown): number {
   if (typeof rangeStr !== "string") return 0;
-  // 匹配 THB1234~THB5678 或 1234.56~5678.90 格式，取下限
+  // 匹配 JPY1234~JPY5678 或 1234.56~5678.90 格式，取下限
   const nums = rangeStr.match(/(\d[\d,]*\.?\d*)/g);
   if (!nums?.length) return 0;
   return Number(nums[0].replace(/,/g, ""));
@@ -357,11 +359,11 @@ function summarizeMarketProducts(records: Array<Record<string, unknown>>, days: 
   }
 
   const top = matchedRecords.slice(0, 10);
-  // ─── 核心修复 2：关键词提取——对泰文/小语种不强行用中英文正则拆，改为"字符串 n-gram + 重复度"──────────────────────────
+  // ─── 核心修复 2：关键词提取——对非英文标题不强行按空格拆，改为"字符串 n-gram + 重复度"──────────────────────────
   const keywords = new Map<string, number>();
   for (const r of top) {
     const name = String(pickRecordField(r, ["name", "product_name", "title"]) ?? "");
-    // 2a) 先抓有空格分隔的词（英语/泰文拼音/品牌词），长度≥2
+    // 2a) 先抓有空格分隔的词（英语/罗马字/品牌词），长度≥2
     const spaceTokens = name.match(/[A-Za-z\u0E00-\u0E7F][A-Za-z0-9\u0E00-\u0E7F\-+]{1,}/g) ?? [];
     for (const m of spaceTokens) {
       const low = m.toLowerCase();
@@ -369,13 +371,13 @@ function summarizeMarketProducts(records: Array<Record<string, unknown>>, days: 
       if (low.length < 2) continue;
       keywords.set(low, (keywords.get(low) ?? 0) + 1);
     }
-    // 2b) 中文词：连续 2-6 字的中文字符
-    const zhTokens = name.match(/[\u4e00-\u9fa5]{2,6}/g) ?? [];
+    // 2b) 中文与日文词：连续 2-8 个汉字或假名（日文标题多为汉字+假名连写）
+    const zhTokens = name.match(/[\u4e00-\u9fa5\u3040-\u30ff]{2,8}/g) ?? [];
     for (const m of zhTokens) {
       keywords.set(m, (keywords.get(m) ?? 0) + 1);
     }
-    // 2c) 小语种兜底：泰文/越南文/印尼文 3-gram（只统计重复出现的片段）
-    const scriptMatch = name.match(/[\u0E00-\u0E7F\u1E00-\u1EFF\u00C0-\u024F]{3,}/g);
+    // 2c) 带变音符号的拉丁字母兜底（越南语、法语等）4-gram，只统计重复出现的片段
+    const scriptMatch = name.match(/[\u1E00-\u1EFF\u00C0-\u024F]{3,}/g);
     if (scriptMatch) {
       for (const blob of scriptMatch) {
         for (let i = 0; i <= blob.length - 4; i++) {
@@ -725,7 +727,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       path,
       emptyLabel: "当前卖家没有返回全球商品类目。",
     });
-    return { content: "我已读取全球商品类目。", artifact };
+    return { content: "已读取全球商品类目。", artifact };
   }
 
   if (query === "seller_permissions") {
@@ -741,7 +743,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       path,
       emptyLabel: "TikTok Shop 没有返回额外卖家权限。",
     });
-    return { content: "我已读取 seller permissions；全球商品操作会以这份结果做资格校验。", artifact };
+    return { content: "已读取 seller permissions；全球商品操作会以这份结果做资格校验。", artifact };
   }
 
   if (query === "authorized_shops" || query === "shop_groups") {
@@ -758,7 +760,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       path,
       emptyLabel: isGroups ? "当前没有返回店铺组。" : "当前没有返回已授权店铺。",
     });
-    return { content: `我已读取${isGroups ? "店铺组" : "已授权店铺列表"}。`, artifact };
+    return { content: `已读取${isGroups ? "店铺组" : "已授权店铺列表"}。`, artifact };
   }
 
   if (query === "orders" || query === "pending_orders" || query === "order_detail" || query === "order_price") {
@@ -791,7 +793,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
         ],
         path,
       });
-      return { content: "我已读取订单价格构成；结果未包含买家姓名、电话或地址。", artifact };
+      return { content: "已读取订单价格构成；结果未包含买家姓名、电话或地址。", artifact };
     }
 
     if (query === "order_detail") {
@@ -806,7 +808,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
         path,
         summary: "只展示运营必要字段，买家姓名、电话和地址不会发送给 LLM。",
       });
-      return { content: "我已读取完整订单，并在展示前移除买家个人信息。", artifact };
+      return { content: "已读取完整订单，并在展示前移除买家个人信息。", artifact };
     }
 
     const path = "/order/202309/orders/search";
@@ -819,9 +821,11 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
         ...(query === "pending_orders" ? { order_status: "AWAITING_SHIPMENT" } : {}),
       },
     });
+    const orderData = dataObject(payload);
+    const orderRecords = extractRecords(orderData, "orders");
     const artifact = recordsArtifact({
       headline: query === "pending_orders" ? "待发货订单" : `近 ${range.days} 天订单`,
-      data: dataObject(payload), recordKey: "orders",
+      data: orderData, recordKey: "orders",
       columns: [
         { key: "id", label: "订单 ID" }, { key: "status", label: "状态" }, { key: "payment", label: "支付" },
         { key: "line_items", label: "商品行" }, { key: "packages", label: "包裹" }, { key: "create_time", label: "创建时间" },
@@ -830,7 +834,21 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       summary: "只展示运营必要字段，买家个人信息不会发送给 LLM。",
       emptyLabel: query === "pending_orders" ? "当前没有待发货订单。" : "该时间范围内没有返回订单。",
     });
-    return { content: `我已读取${query === "pending_orders" ? "待发货" : `近 ${range.days} 天`}订单。`, artifact };
+    // 用接口真实返回的条数和状态分布作答，不用"我已读取订单"这类占位话术
+    const statusCounts = new Map<string, number>();
+    for (const record of orderRecords) {
+      const status = typeof record.status === "string" && record.status.trim() ? record.status.trim() : "接口未标注状态";
+      statusCounts.set(status, (statusCounts.get(status) ?? 0) + 1);
+    }
+    const statusText = [...statusCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([status, count]) => `${status} ${count} 个`)
+      .join("、");
+    const scope = query === "pending_orders" ? "待发货" : `近 ${range.days} 天`;
+    const content = orderRecords.length
+      ? `${scope}订单共 ${orderRecords.length} 个，状态分布：${statusText}。下方表格是官方接口原样返回的字段，买家个人信息已剔除。`
+      : `${scope}没有符合条件的订单：订单接口在这个时间窗内返回 0 条记录。`;
+    return { content, artifact };
   }
 
   if (query === "promotions_overview") {
@@ -876,7 +894,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       path,
       emptyLabel: isCoupon ? "当前没有返回优惠券。" : "当前没有返回促销活动。",
     });
-    return { content: `我已读取 TikTok Shop 当前${isCoupon ? "优惠券" : "促销活动"}。`, artifact };
+    return { content: `已读取 TikTok Shop 当前${isCoupon ? "优惠券" : "促销活动"}。`, artifact };
   }
 
   if (query === "combinable_packages") {
@@ -914,7 +932,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       path,
       emptyLabel: "该时间范围内没有返回包裹。",
     });
-    return { content: "我已读取 TikTok Shop 履约包裹。", artifact };
+    return { content: "已读取 TikTok Shop 履约包裹。", artifact };
   }
 
   if (query === "warehouses") {
@@ -931,7 +949,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       path,
       emptyLabel: "TikTok Shop 没有返回仓库。",
     });
-    return { content: "我已读取当前店铺可用仓库。", artifact };
+    return { content: "已读取当前店铺可用仓库。", artifact };
   }
 
   if (query === "shipping_templates") {
@@ -948,7 +966,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       path,
       emptyLabel: "当前没有返回可用物流模板。",
     });
-    return { content: "我已读取当前店铺的可用物流模板。", artifact };
+    return { content: "已读取当前店铺的可用物流模板。", artifact };
   }
 
   if (query === "order_tracking") {
@@ -972,7 +990,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       path,
       emptyLabel: "该订单当前没有返回物流轨迹。",
     });
-    return { content: "我已读取订单物流轨迹。", artifact };
+    return { content: "已读取订单物流轨迹。", artifact };
   }
 
   if (query === "tracking_validation") {
@@ -1011,7 +1029,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
         path,
         summary: "备注和媒体等可能包含个人信息的字段不会发送给 LLM。",
       });
-      return { content: "我已读取退货处理记录，并只展示运营必要字段。", artifact };
+      return { content: "已读取退货处理记录，并只展示运营必要字段。", artifact };
     }
 
     if (query === "aftersale_eligibility") {
@@ -1023,7 +1041,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
         headline: `订单 ${id} 售后资格`, data: { records }, recordKey: "records",
         columns: [{ key: "sku_id", label: "SKU ID" }, { key: "order_line_item_id", label: "订单行" }, { key: "eligible_request_types", label: "可申请类型" }, { key: "reasons", label: "可用原因" }], path,
       });
-      return { content: "我已读取订单售后资格。", artifact };
+      return { content: "已读取订单售后资格。", artifact };
     }
 
     const path = "/return_refund/202603/aftersales/search";
@@ -1041,7 +1059,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       path,
       emptyLabel: "当前没有返回售后请求。",
     });
-    return { content: "我已读取售后请求，并排除买家个人信息字段。", artifact };
+    return { content: "已读取售后请求，并排除买家个人信息字段。", artifact };
   }
 
   if (query === "finance_order_transactions") {
@@ -1060,7 +1078,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
       path,
       summary: "财务明细仅在当前会话展示，不会写入聊天日志之外的业务日志。",
     });
-    return { content: "我已读取该订单的财务流水。", artifact };
+    return { content: "已读取该订单的财务流水。", artifact };
   }
 
   const financeConfig = {
@@ -1118,7 +1136,7 @@ export async function runTikTokSceneQuery(query: TikTokSceneQuery, requestedDays
     path: financeConfig.path,
     emptyLabel: `当前没有返回${financeConfig.label}。`,
   });
-  return { content: `我已读取 TikTok Shop ${financeConfig.label}。`, artifact };
+  return { content: `已读取 TikTok Shop ${financeConfig.label}。`, artifact };
 }
 
 // ─── 赛道/类目深度分析：返回竞争格局、价格带、头部特征、进入建议 ──────────────────────────────
@@ -1132,7 +1150,10 @@ export async function analyzeCategoryTrack(
   const [client, authorization] = await Promise.all([getAuthorizedTikTokClient(), readStoredAuthorization()]);
   if (!client) throw new Error("TikTok Shop 尚未完成授权，无法读取真实赛道数据。");
 
-  const regionLabel = REGION_LABELS[region] ?? region;
+  // 用户没点名市场时用店铺自己的站点：接口本身是店铺维度的，
+  // 标一个别的市场只会在结论里写出错误的地区名。
+  const ownRegion = selectedRegion(authorization);
+  const regionLabel = REGION_LABELS[region] ?? REGION_LABELS[ownRegion ?? ""] ?? region ?? "当前站点";
   const categoryIntent = extractCategoryIntent(categoryQuery) ?? extractCategoryIntent(originalText);
   const categoryLabel = categoryIntent?.label ?? categoryQuery;
 

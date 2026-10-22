@@ -47,9 +47,6 @@ const KolPage = lazy(() =>
 const IntelligenceCenter = lazy(() =>
   import("./components/IntelligenceCenter").then(({ IntelligenceCenter: Component }) => ({ default: Component })),
 );
-const PricingWorkspace = lazy(() =>
-  import("./components/PricingWorkspace").then(({ PricingWorkspace: Component }) => ({ default: Component })),
-);
 const SkillManager = lazy(() =>
   import("./components/SkillManager").then(({ SkillManager: Component }) => ({ default: Component })),
 );
@@ -572,8 +569,6 @@ export default function App() {
           </Suspense>
         ) : activeView === "kol_creators" || activeView === "kol_tasks" || activeView === "kol_data" ? (
           <KolPage view={activeView} onOpenChat={openKolWorkspace} />
-        ) : activeView === "pricing" ? (
-          <PricingWorkspace />
         ) : (
           <AppPage
             view={activeView}

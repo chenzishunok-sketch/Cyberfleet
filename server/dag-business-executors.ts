@@ -30,6 +30,7 @@ import {
   miaoshouAiGenerateProductInfo,
   miaoshouPublishToTikTok,
   miaoshouGetShopList,
+  miaoshouResolveSite,
 } from "./miaoshou-client.ts";
 import { searchTmapiItemsByKeyword } from "./tmapi-client.ts";
 import { callChuhaijiangTool } from "./chuhaijiang-client.ts";
@@ -49,22 +50,23 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * 自动解析妙手 TikTok 店铺（运营未显式提供 shopIds 时兜底）。
- * 按常见站点顺序查询，返回第一个非空站点的店铺 ID 与站点代码。
+ *
+ * 站点顺序交给 `miaoshouResolveSite()`（与店铺列表、发布流程共用一份站点表）。
+ * 之前这里写死八站点且不含日本站，日本单店账号会白跑八次请求、每次间隔 1.2 秒，
+ * 最后还是解析不到店铺。
  */
 async function resolveMiaoshouShop(): Promise<{ shopIds: number[]; site: string } | undefined> {
-  const prioritySites = ["TH", "US", "MY", "PH", "SG", "VN", "ID", "UK"];
-  for (const site of prioritySites) {
-    try {
-      const result = await miaoshouGetShopList("tiktok", site);
-      const shops = ((result.data ?? {}) as { shopList?: Array<Record<string, unknown>> }).shopList ?? [];
-      const ids = shops
-        .map((s) => Number(s.shopId))
-        .filter((n) => Number.isFinite(n) && n > 0);
-      if (ids.length) return { shopIds: ids, site };
-    } catch {
-      // 该站点无权限或失败，继续查下一站
-    }
-    await sleep(1200);
+  const site = await miaoshouResolveSite();
+  if (!site) return undefined;
+  try {
+    const result = await miaoshouGetShopList("tiktok", site);
+    const shops = ((result.data ?? {}) as { shopList?: Array<Record<string, unknown>> }).shopList ?? [];
+    const ids = shops
+      .map((s) => Number(s.shopId))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    if (ids.length) return { shopIds: ids, site };
+  } catch {
+    // 查到了站点却取不到店铺，交给调用方报明确的错
   }
   return undefined;
 }

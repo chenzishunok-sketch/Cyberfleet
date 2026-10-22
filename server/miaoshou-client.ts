@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { getMiaoshouRuntimeConfig } from "./runtime-config.ts";
 import { getLlmRuntimeConfig } from "./llm-providers.ts";
 import { callLlmRaw, fastModel } from "./llm.ts";
+import { TIKTOK_SITES, languageLabel, titleLengthHint } from "./tiktok-sites.ts";
 
 export function hasMiaoshouConfiguration(): boolean {
   const config = getMiaoshouRuntimeConfig();
@@ -65,6 +66,9 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1500;
 /** 频率超限需要等到下一个计时窗口，退避要明显长于普通重试 */
 const RATE_LIMIT_BACKOFF_MS = 3_000;
+/** 店铺列表按站点扇出时每批几个站点。妙手的 QPS 限制很紧，实测并发 3 个就会超限，只能是串行 */
+const SHOP_LIST_BATCH_SIZE = 1;
+const SHOP_LIST_BATCH_GAP_MS = 120;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 async function miaoshouRequestOnce<T = unknown>(
@@ -277,13 +281,10 @@ export async function miaoshouAiMatchAttribute(itemId: string, categoryId: strin
   }, { retry: false });
 }
 
-/** TikTok 常见站点列表 */
-const TIKTOK_SITES = ["US", "UK", "TH", "VN", "MY", "PH", "SG", "ID"];
-
 /**
  * 获取店铺数据列表。
- * API 要求 site 必须是真实站点代码（如 TH/US/MY），不接受空字符串。
- * site="all" 时并行请求所有 TikTok 常见站点并合并结果。
+ * API 要求 site 必须是真实站点代码（如 JP/TH/US/MY），不接受空字符串。
+ * site="all" 时逐批查询全部站点并合并结果——站点列表见 `tiktok-sites.ts`。
  */
 export async function miaoshouGetShopList(platform = "tiktok", site = "all") {
   if (site && site !== "all") {
@@ -294,32 +295,40 @@ export async function miaoshouGetShopList(platform = "tiktok", site = "all") {
       pageSize: 100,
     });
   }
-  // site="all" 或空：并行请求所有站点并合并（原串行 ~160s → 并行 ~20s）
-  const results = await Promise.all(
-    TIKTOK_SITES.map(async (s) => {
-      try {
-        return await miaoshouRequest("/open/v1/product/shop/shop/get_shop_list", {
-          platform,
-          site: s,
-          pageNo: 1,
-          pageSize: 100,
-        });
-      } catch {
-        return null;
-      }
-    }),
-  );
+  // site="all"：分批并发查询每个站点后合并。
+  // 一次全部打出去会撞「账户接口每秒请求频率超限」，触发 3s/6s 退避，反而比串行还慢，
+  // 所以按 3 个一批、批间留一点间隔。
   const allShops: Array<Record<string, unknown>> = [];
   const seenShopIds = new Set<string>();
-  for (const result of results) {
-    if (!result) continue;
-    const data = result.data as { shopList?: Array<Record<string, unknown>> } | undefined;
-    for (const shop of data?.shopList ?? []) {
-      const shopId = String(shop.shopId ?? "");
-      if (shopId && !seenShopIds.has(shopId)) {
-        seenShopIds.add(shopId);
-        allShops.push(shop);
+  for (let index = 0; index < TIKTOK_SITES.length; index += SHOP_LIST_BATCH_SIZE) {
+    const batch = TIKTOK_SITES.slice(index, index + SHOP_LIST_BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map(async (siteCode) => {
+        try {
+          return await miaoshouRequest("/open/v1/product/shop/shop/get_shop_list", {
+            platform,
+            site: siteCode,
+            pageNo: 1,
+            pageSize: 100,
+          });
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const result of results) {
+      if (!result) continue;
+      const data = result.data as { shopList?: Array<Record<string, unknown>> } | undefined;
+      for (const shop of data?.shopList ?? []) {
+        const shopId = String(shop.shopId ?? "");
+        if (shopId && !seenShopIds.has(shopId)) {
+          seenShopIds.add(shopId);
+          allShops.push(shop);
+        }
       }
+    }
+    if (index + SHOP_LIST_BATCH_SIZE < TIKTOK_SITES.length) {
+      await new Promise((resolve) => setTimeout(resolve, SHOP_LIST_BATCH_GAP_MS));
     }
   }
   return {
@@ -328,6 +337,28 @@ export async function miaoshouGetShopList(platform = "tiktok", site = "all") {
     message: "",
     data: { shopList: allShops } as unknown,
   } as MiaoshouResponse<unknown>;
+}
+
+/**
+ * 探测账号下有店铺的站点。
+ *
+ * 按 `TIKTOK_SITES` 顺序串行探测、命中即返回——日本站排在首位，
+ * 单店铺账号通常一次请求就能拿到，不必每次九路扇出，也就不会撞 QPS 限流。
+ * 用于「查类目树」这类必须先知道 site 才能调的接口。
+ */
+export async function miaoshouResolveSite(platform = "tiktok"): Promise<string | undefined> {
+  for (const site of TIKTOK_SITES) {
+    try {
+      const response = await miaoshouRequest<{ shopList?: Array<Record<string, unknown>> }>(
+        "/open/v1/product/shop/shop/get_shop_list",
+        { platform, site, pageNo: 1, pageSize: 10 },
+      );
+      if ((response?.data?.shopList ?? []).length > 0) return site;
+    } catch {
+      // 该站点没有店铺或接口临时失败，继续试下一个
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -372,9 +403,8 @@ export async function resolveMiaoshouShopId(
     return trySite(region.toUpperCase());
   }
 
-  // 没有站点信息时按顺序试探。JP 曾经缺失，导致已授权的日本站店铺永远解析不出来。
-  const prioritySites = ["TH", "JP", "US", "MY", "PH", "SG", "VN", "ID", "UK", "MX", "BR", "DE", "ES", "FR", "IT", "IE"];
-  for (const site of prioritySites) {
+  // 没有站点信息时按统一站点表顺序试探（日本站排首位，单店账号一次命中）
+  for (const site of TIKTOK_SITES) {
     const found = await trySite(site);
     if (found) return found;
   }
@@ -486,12 +516,14 @@ export async function miaoshouAiGenerateProductInfo(itemId: string, shopId: numb
 
   if (!rawTitle && !rawDesc) throw new Error("妙手没有返回商品信息，无法生成标题和描述。");
 
-  const langLabel = language ? `目标语言：${language}。` : "";
-  const systemPrompt = `你是一个专业的跨境电商商品文案专家。根据商品原始信息，生成适合 TikTok Shop 的英文标题和商品描述（notes）。
+  const targetLanguage = (language ?? "en").trim().toLowerCase();
+  const languageName = languageLabel(targetLanguage);
+  const systemPrompt = `你是一个专业的跨境电商商品文案专家。根据商品原始信息，生成适合 TikTok Shop 的${languageName}标题和商品描述（notes）。
 要求：
-- 标题：简洁有力，包含核心关键词，不超过 120 字符
+- 标题：简洁有力，包含核心关键词，${titleLengthHint(targetLanguage)}
 - 描述（notes）：突出卖点、材质、尺寸、使用场景，3-5 句话
-${langLabel}
+- 全文只能用${languageName}，不要混入中文或英文词（品牌名、型号除外）
+- 不得出现工厂、批发、跨境、代发等面向采购方而非消费者的词
 以 JSON 格式返回：{"title": "...", "notes": "..."}`;
 
   const userContent = [

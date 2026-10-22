@@ -3,11 +3,7 @@ import type {
   ChatRequest,
   MessageArtifact,
   SourcingCandidate,
-  SkuPricingInput,
 } from "../shared/contracts.ts";
-import { calculateSkuPricing } from "./pricing-engine.ts";
-import { pricingDefaults } from "./pricing-source.ts";
-import { THAILAND_PRELIMINARY_RATES, THAILAND_PRICING_DEFAULTS } from "./pricing-rules.ts";
 import {
   convertTmapiImageUrl,
   getTmapiItemDetailById,
@@ -19,13 +15,10 @@ import {
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const CANDIDATE_LIMIT = 6;
 const DEFAULT_WEIGHT_KG = 0.5;
-const DEFAULT_TARGET_MARGIN = 0.2;
 
 export interface SourcingIntent {
   image?: ChatImageAttachment;
   imageUrl?: string;
-  requestedSalePriceThb?: number;
-  targetMargin: number;
   maxPurchasePriceCny?: number;
   minimumSales?: number;
   factoryOnly: boolean;
@@ -44,11 +37,6 @@ function positiveNumber(value: unknown): number | undefined {
   return Number.isFinite(number) && number > 0 ? number : undefined;
 }
 
-function parsePercent(value: string | undefined): number | undefined {
-  const number = Number(value);
-  return Number.isFinite(number) && number > 0 && number < 100 ? number / 100 : undefined;
-}
-
 function imageUrlFromText(text: string): string | undefined {
   return [...text.matchAll(/https?:\/\/[^\s<>"，。）)]+/gi)]
     .map((match) => match[0])
@@ -61,8 +49,6 @@ export function inferSourcingIntent(request: Pick<ChatRequest, "message" | "atta
   const hasSourcingLanguage = /(以图搜|图片.*(?:找|搜).*(?:同款|货源|1688)|(?:找|搜).*(?:1688同款|同款货源|供应商)|帮我找这个产品的?1688同款)/i.test(text);
   if (!image && !hasSourcingLanguage) return undefined;
 
-  const requestedSalePriceThb = positiveNumber(text.match(/(?:售价|卖价|按)\s*(\d+(?:\.\d+)?)\s*(?:THB|泰铢)/i)?.[1]);
-  const targetMargin = parsePercent(text.match(/(?:目标)?利润率\s*(\d+(?:\.\d+)?)\s*%/i)?.[1]) ?? DEFAULT_TARGET_MARGIN;
   const maxPurchasePriceCny = positiveNumber(text.match(/(?:采购价|进货价|货源价).{0,8}(?:不超过|低于|最高)?\s*(\d+(?:\.\d+)?)\s*(?:元|CNY)/i)?.[1]);
   const minimumSales = positiveNumber(text.match(/(?:销量|成交).{0,8}(?:超过|大于|最少)?\s*(\d+)/i)?.[1]);
   const sort = /价格从低|低价优先/i.test(text)
@@ -75,8 +61,6 @@ export function inferSourcingIntent(request: Pick<ChatRequest, "message" | "atta
   return {
     image,
     imageUrl: image ? undefined : imageUrlFromText(text),
-    requestedSalePriceThb,
-    targetMargin,
     maxPurchasePriceCny,
     minimumSales,
     factoryOnly: /只看工厂|工厂货源|生产厂家/i.test(text),
@@ -199,63 +183,25 @@ function conservativeWeight(detail?: TmapiItemDetail): { weightKg: number; estim
   return weight ? { weightKg: weight, estimated: false } : { weightKg: DEFAULT_WEIGHT_KG, estimated: true };
 }
 
-function pricingInput(purchasePriceCny: number, weightKg: number, domesticShippingCny: number, salePriceThb: number): SkuPricingInput {
-  const defaults = pricingDefaults();
-  return {
-    salePriceThb,
-    purchasePriceCny,
-    weightKg,
-    domesticLogisticsCny: domesticShippingCny,
-    exchangeRateCnyToThb: defaults.exchangeRateCnyToThb,
-    cloudWarehouseCny: defaults.cloudWarehouseCny,
-    buyerLocalDeliveryThb: defaults.buyerLocalDeliveryThb,
-    advertisingThb: defaults.advertisingThb,
-    creatorCommissionRate: defaults.creatorCommissionRate,
-    taxRate: THAILAND_PRELIMINARY_RATES.taxRate,
-    categoryCommissionRate: THAILAND_PRELIMINARY_RATES.categoryCommissionRate,
-    crossBorderThbPer10g: THAILAND_PRICING_DEFAULTS.crossBorderThbPer10g,
-    transactionRate: THAILAND_PRICING_DEFAULTS.transactionRate,
-    infrastructureFeeThb: THAILAND_PRICING_DEFAULTS.infrastructureFeeThb,
-    growthSupportRate: THAILAND_PRICING_DEFAULTS.growthSupportRate,
-    merchantDiscountThb: 0,
-    platformSubsidyThb: 0,
-    platformActivityFeeThb: 0,
-  };
-}
-
-function suggestedSalePrice(input: Omit<SkuPricingInput, "salePriceThb">, targetMargin: number): number {
-  let low = 1;
-  let high = 5000;
-  for (let index = 0; index < 42; index += 1) {
-    const middle = (low + high) / 2;
-    const result = calculateSkuPricing({ ...input, salePriceThb: middle });
-    if (result.expectedMargin >= targetMargin) high = middle;
-    else low = middle;
-  }
-  return Math.ceil(high);
-}
-
 function candidateFrom(
   item: TmapiImageSearchItem,
   detail: TmapiItemDetail | undefined,
   score: number,
-  intent: SourcingIntent,
 ): SourcingCandidate {
   const purchasePriceCny = minimumPurchasePrice(item, detail);
   const weight = conservativeWeight(detail);
-  const domesticShippingCny = typeof detail?.delivery_info?.delivery_fee === "number" && detail.delivery_info.delivery_fee >= 0
-    ? detail.delivery_info.delivery_fee
-    : pricingDefaults().domesticLogisticsCny;
-  const baseline = pricingInput(purchasePriceCny, weight.weightKg, domesticShippingCny, 1);
-  const { salePriceThb: _ignored, ...withoutSalePrice } = baseline;
-  const suggested = suggestedSalePrice(withoutSalePrice, intent.targetMargin);
-  const salePriceThb = intent.requestedSalePriceThb ?? suggested;
-  const result = calculateSkuPricing({ ...baseline, salePriceThb });
+  const reportedShipping = detail?.delivery_info?.delivery_fee;
+  const hasShipping = typeof reportedShipping === "number" && reportedShipping >= 0;
+  const domesticShippingCny = hasShipping ? reportedShipping : 0;
+  // 到岸成本只算采购价 + 国内运费：跨境物流、平台佣金和税项随站点与类目变化，
+  // 在定价环节才确定，这里不预估，免得候选表里的数字被当成到手利润。
+  const landedCostCny = purchasePriceCny + domesticShippingCny;
   const itemId = String(item.item_id);
   const warnings = [
     ...(weight.estimated ? ["重量未返回，暂按 0.5kg 估算"] : []),
     ...(!detail ? ["商品详情读取失败，暂用搜索结果估算"] : []),
     ...(detail?.is_sold_out ? ["商品已售罄"] : []),
+    ...(hasShipping ? [] : ["国内运费未返回，到岸成本暂未计入"]),
   ];
   return {
     itemId,
@@ -277,12 +223,7 @@ function candidateFrom(
     weightKg: weight.weightKg,
     weightEstimated: weight.estimated,
     domesticShippingCny,
-    salePriceThb,
-    suggestedSalePriceThb: suggested,
-    expectedCostThb: result.expectedCostThb,
-    expectedProfitThb: result.expectedProfitThb,
-    expectedMargin: result.expectedMargin,
-    breakEvenPriceThb: result.breakEvenPriceThb,
+    landedCostCny,
     tags: [
       ...(item.shop_info?.is_factory ? ["工厂"] : []),
       ...(item.shop_info?.is_super_factory ? ["超级工厂"] : []),
@@ -336,33 +277,23 @@ export async function runSourcingSearch(intent: SourcingIntent): Promise<Sourcin
     item,
     details[index].status === "fulfilled" ? details[index].value : undefined,
     score,
-    intent,
   ));
-  const defaults = pricingDefaults();
   const totalCount = intent.minimumSales ? filtered.length : search.total_count ?? filtered.length;
-  const saleExplanation = intent.requestedSalePriceThb
-    ? `按你设定的 ${intent.requestedSalePriceThb.toFixed(2)} THB 售价计算。`
-    : `未指定售价，已按 ${(intent.targetMargin * 100).toFixed(0)}% 目标利润率反算建议售价。`;
+  const costNote = "到岸成本只含采购价和国内运费；跨境物流、平台佣金与税项随站点和类目变化，需要定价时单独计算。";
   if (!candidates.length) {
     return { content: `已完成图片搜索，但当前筛选条件没有匹配商品。${intent.factoryOnly ? "可以取消“只看工厂”后再试。" : "可以换一张主体更清晰的图片。"}` };
   }
   return {
-    content: `已完成1688以图搜和货源初选，从 ${search.total_count ?? candidates.length} 个结果中补全了 ${candidates.length} 个候选商品的供应商、SKU价格、重量和泰国店铺预估利润。${saleExplanation}税率和平台佣金在选定 TikTok 叶子类目后会再精确计算。`,
+    content: `已完成1688以图搜和货源初选，从 ${search.total_count ?? candidates.length} 个结果中补全了 ${candidates.length} 个候选商品的供应商、SKU价格、重量和国内运费。${costNote}`,
     artifact: {
       kind: "sourcing_candidates",
       headline: "1688 同款货源候选",
-      summary: `已对比 ${candidates.length} 个候选·${saleExplanation}`,
+      summary: `已对比 ${candidates.length} 个候选的采购价、起订量、销量与供应商资质`,
       queryImageUrl: intent.image?.dataUrl ?? publicImageUrl,
       totalCount,
       candidates,
-      assumptions: {
-        requestedSalePriceThb: intent.requestedSalePriceThb,
-        targetMargin: intent.targetMargin,
-        taxRate: THAILAND_PRELIMINARY_RATES.taxRate,
-        categoryCommissionRate: THAILAND_PRELIMINARY_RATES.categoryCommissionRate,
-        buyerLocalDeliveryThb: defaults.buyerLocalDeliveryThb,
-      },
-      source: "TMAPI 1688 图片搜索·商品详情·本地泰国成本利润模型",
+      costNote,
+      source: "TMAPI 1688 图片搜索·商品详情·采购价与供应商对比",
     },
   };
 }

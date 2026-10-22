@@ -1,12 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type {
-  PricingDefaults,
   ProductPublishWorkflowRun,
-  SkuPricingInput,
-  SkuPricingRecord,
   WorkflowShopOption,
   WorkflowStep,
 } from "../shared/contracts.ts";
+import { PRIMARY_LANGUAGE, PRIMARY_SITE, languageForSite } from "./tiktok-sites.ts";
 import {
   hasMiaoshouConfiguration,
   miaoshouAiGenerateProductInfo,
@@ -17,6 +15,7 @@ import {
   miaoshouFetchItem,
   miaoshouGetPublishRecords,
   miaoshouGetShopList,
+  miaoshouResolveSite,
   miaoshouGetTikTokCollectBoxList,
   miaoshouGetTikTokCategoryMetadata,
   miaoshouGetTikTokShopCollectItemInfo,
@@ -29,9 +28,6 @@ import {
 import { errorMessage, initialSteps as buildInitialSteps, patchStep as patchWorkflowStep, RunLockMap } from "./workflow-core.ts";
 import { WorkflowStore, workflowStore } from "./workflow-store.ts";
 import { getAuthorizedTikTokClient, readStoredAuthorization } from "./tiktok-auth.ts";
-import { calculateSkuPricing, summarizePricing } from "./pricing-engine.ts";
-import { fetchWorkflowPricing } from "./pricing-source.ts";
-import { PricingStore, pricingStore } from "./pricing-store.ts";
 
 export interface ProductPublishWorkflowTools {
   listShops(): Promise<WorkflowShopOption[]>;
@@ -45,7 +41,6 @@ export interface ProductPublishWorkflowTools {
     shopName?: string;
     region?: string;
   }): Promise<{ categoryId?: string; warnings: string[]; resolvedShopId?: string }>;
-  preparePricing?(run: ProductPublishWorkflowRun): Promise<{ defaults: PricingDefaults; records: SkuPricingRecord[] }>;
   prepareEdit?(input: {
     platformDetailId: string;
     shopId: string;
@@ -80,46 +75,17 @@ export interface ProductPublishWorkflowTools {
   }): Promise<{ matched: boolean; summary: string; productId?: string; productTitle?: string; skuIds?: string[]; skus?: Array<{ id: string; sellerSku?: string }> }>;
 }
 
-/** TikTok SKU 与台账 SKU 的对位：优先 sellerSku 精确匹配，两侧数量一致时才允许位置对位；对不上时宁可不回填 */
-function matchTikTokSkuId(
-  record: SkuPricingRecord,
-  index: number,
-  tiktokSkus: Array<{ id: string; sellerSku?: string }>,
-  recordCount: number,
-): string | undefined {
-  const sellerSku = record.sellerSku?.trim();
-  if (sellerSku) {
-    const hit = tiktokSkus.find((sku) => (sku.sellerSku ?? "").trim().toLowerCase() === sellerSku.toLowerCase());
-    if (hit) return hit.id;
-  }
-  if (tiktokSkus.length === recordCount) return tiktokSkus[index]?.id;
-  return undefined;
-}
-
 const STEP_LABELS: Array<[WorkflowStep["id"], string]> = [
   ["prepare", "运营总监 · 检查连接并选择店铺"],
   ["collect", "采集 Agent · 采集 1688 商品"],
   ["claim", "上架 Agent · 认领到 TikTok 采集箱"],
   ["enrich", "上架 Agent · 补全类目、属性和文案"],
-  ["pricing", "定价 Agent · 计算 SKU 成本和利润"],
   ["edit", "上架 Agent · 保存售价和商品资料"],
   ["validate", "上架 Agent · 检查发布必填项"],
   ["confirm", "运营总监 · 确认发布信息"],
   ["publish", "上架 Agent · 发布到 TikTok 店铺"],
   ["verify", "上架 Agent · 核验发布结果"],
 ];
-
-const LANGUAGE_BY_SITE: Record<string, string> = {
-  TH: "th",
-  VN: "vi",
-  MY: "ms",
-  ID: "id",
-  PH: "en",
-  SG: "en",
-  US: "en",
-  UK: "en",
-  GB: "en",
-};
 
 const PUBLISH_VERIFICATION_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 // 妙手采集是异步的，且对已采集过的链接会返回没有 payload 的 skip 行，等待要给足。
@@ -272,36 +238,32 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     // 1) 从妙手拉取店铺列表（优先 site=all，失败则回退到按 region 单独请求）
     let miaoshouShopsList: Array<Record<string, unknown>> = [];
     if (hasMiaoshouConfiguration()) {
-      try {
-        const response = await miaoshouGetShopList("tiktok", "all");
-        const arr = asRecord(response.data)?.shopList;
-        if (Array.isArray(arr) && arr.length) {
-          miaoshouShopsList = arr;
-        }
-      } catch (err) {
-        console.warn(`[listShops] site=all 获取失败:`, (err as Error).message);
-      }
-    }
-
-    // 如果 site=all 没有返回店铺，尝试读取 OAuth 已授权店铺的 region，逐个请求
-    if (!miaoshouShopsList.length && hasMiaoshouConfiguration()) {
+      // 只查 OAuth 已授权店铺所在的站点——一个店铺一个请求。
+      // 之前这里用 site=all 扇出全部站点，日本单店账号会连打 9 个请求，
+      // 直接撞上妙手「账户接口每秒请求频率超限」，要靠 3s/6s 退避才恢复，反而更慢。
       try {
         const stored = await readStoredAuthorization();
         const regions = new Set<string>();
-        if (stored?.shops?.length) {
-          for (const s of stored.shops) {
-            const r = (s.region || "").toUpperCase();
-            if (r) regions.add(r);
-          }
+        for (const shop of stored?.shops ?? []) {
+          const region = (shop.region || "").toUpperCase();
+          if (region) regions.add(region);
+        }
+        if (!regions.size) {
+          const resolved = await miaoshouResolveSite();
+          if (resolved) regions.add(resolved);
         }
         for (const region of regions) {
           try {
             const response = await miaoshouGetShopList("tiktok", region);
             const arr = asRecord(response.data)?.shopList;
             if (Array.isArray(arr)) miaoshouShopsList.push(...arr);
-          } catch { /* 单站点失败跳过 */ }
+          } catch {
+            // 单站点失败跳过，不阻断整个列表
+          }
         }
-      } catch { /* OAuth 读取失败跳过 */ }
+      } catch (err) {
+        console.warn(`[listShops] 妙手店铺获取失败:`, (err as Error).message);
+      }
     }
 
     // 2) 优先从 TikTok 官方 OAuth 已授权的店铺获取
@@ -443,7 +405,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
 
     if (categoryId) {
       try {
-        await miaoshouAiMatchAttribute(platformDetailId, categoryId, region ?? "TH");
+        await miaoshouAiMatchAttribute(platformDetailId, categoryId, region ?? PRIMARY_SITE);
       } catch (error) {
         warnings.push(`属性自动匹配失败：${errorMessage(error)}`);
       }
@@ -467,10 +429,6 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     }
 
     return { categoryId, warnings, resolvedShopId };
-  },
-
-  async preparePricing(run) {
-    return fetchWorkflowPricing(run);
   },
 
   async prepareEdit({ platformDetailId, shopId, publishPrice, skuPrices, selectedSkuKeys, packageDimensions, title, description }) {
@@ -720,7 +678,6 @@ export class ProductPublishWorkflowEngine {
   constructor(
     private readonly store: WorkflowStore = workflowStore,
     private readonly tools: ProductPublishWorkflowTools = realProductPublishWorkflowTools,
-    private readonly skuPricingStore: PricingStore = pricingStore,
   ) {}
 
   async list(): Promise<ProductPublishWorkflowRun[]> {
@@ -766,7 +723,7 @@ export class ProductPublishWorkflowEngine {
       targetPlatform: "tiktok",
       ...(input.shopId ? { shopId: input.shopId } : {}),
       ...(input.publishPrice !== undefined ? { publishPrice: input.publishPrice } : {}),
-      currency: input.currency?.trim().toUpperCase() || "THB",
+      currency: input.currency?.trim().toUpperCase() || "JPY",
       ...(input.packageDimensions ? { packageDimensions: input.packageDimensions } : {}),
       ...(input.title?.trim() ? { requestedTitle: input.title.trim() } : {}),
       ...(input.description?.trim() ? { requestedDescription: input.description.trim() } : {}),
@@ -810,7 +767,7 @@ export class ProductPublishWorkflowEngine {
           shopId: shop.id,
           shopName: shop.name,
           shopSite: shop.site,
-          targetLanguage: LANGUAGE_BY_SITE[shop.site] ?? "en",
+          targetLanguage: languageForSite(shop.site),
           requiredInput: undefined,
           error: undefined,
         };
@@ -871,94 +828,6 @@ export class ProductPublishWorkflowEngine {
     return this.run(id);
   }
 
-  async updatePricingInput(id: string, input: {
-    defaults?: Partial<PricingDefaults>;
-    skus?: Array<{ skuKey: string; values: Partial<SkuPricingInput> }>;
-    removedSkuKeys?: string[];
-  }): Promise<ProductPublishWorkflowRun> {
-    const allowedDefaultFields = new Set<keyof PricingDefaults>([
-      "exchangeRateCnyToThb", "domesticLogisticsCny", "cloudWarehouseCny",
-      "buyerLocalDeliveryThb", "advertisingThb", "creatorCommissionRate",
-    ]);
-    const next = await this.locks.withLock(id, async () => this.update(id, (run) => {
-      if (!run.pricingSkus?.length) throw new Error("这个任务还没有生成 SKU 成本记录。");
-      const defaults = { ...(run.pricingDefaults ?? {}) } as PricingDefaults;
-      for (const [field, rawValue] of Object.entries(input.defaults ?? {})) {
-        if (!allowedDefaultFields.has(field as keyof PricingDefaults)) continue;
-        const value = Number(rawValue);
-        if (!Number.isFinite(value) || value < 0) throw new Error("成本和费率不能小于 0。");
-        if (field === "exchangeRateCnyToThb" && value <= 0) throw new Error("人民币兑泰铢汇率必须大于 0。");
-        defaults[field as keyof PricingDefaults] = value;
-      }
-      const removedSkuKeys = new Set(input.removedSkuKeys ?? []);
-      const knownSkuKeys = new Set(run.pricingSkus.map((record) => record.skuKey));
-      if ([...removedSkuKeys].some((skuKey) => !knownSkuKeys.has(skuKey))) throw new Error("要移除的 SKU 已不存在，请刷新后重试。");
-      const retainedSkus = run.pricingSkus.filter((record) => !removedSkuKeys.has(record.skuKey));
-      if (!retainedSkus.length) throw new Error("至少需要保留一个待发布 SKU。");
-      const overrides = new Map((input.skus ?? []).map((sku) => [sku.skuKey, sku.values]));
-      const now = new Date().toISOString();
-      const records = retainedSkus.map((record) => {
-        const values = overrides.get(record.skuKey) ?? {};
-        const merged: SkuPricingInput = {
-          ...record.input,
-          exchangeRateCnyToThb: defaults.exchangeRateCnyToThb,
-          domesticLogisticsCny: defaults.domesticLogisticsCny,
-          cloudWarehouseCny: defaults.cloudWarehouseCny,
-          buyerLocalDeliveryThb: defaults.buyerLocalDeliveryThb,
-          advertisingThb: defaults.advertisingThb,
-          creatorCommissionRate: defaults.creatorCommissionRate,
-          ...Object.fromEntries(Object.entries(values).map(([field, value]) => [field, Number(value)])),
-        };
-        const missingFields = record.missingFields.filter((field) => {
-          const value = merged[field as keyof SkuPricingInput];
-          return !Number.isFinite(Number(value)) || Number(value) <= 0;
-        });
-        return {
-          ...record,
-          input: merged,
-          result: calculateSkuPricing(merged),
-          missingFields,
-          fieldSources: {
-            ...record.fieldSources,
-            ...Object.fromEntries(Object.keys(values).map((field) => [field, "manual" as const])),
-            ...Object.fromEntries(Object.keys(input.defaults ?? {}).map((field) => [field, "manual" as const])),
-          },
-          calculatedAt: now,
-        };
-      });
-      const firstPrice = records[0]?.input.salePriceThb;
-      const uniformPrice = records.every((record) => record.input.salePriceThb === firstPrice) ? firstPrice : run.publishPrice;
-      const missing = unique(records.flatMap((record) => record.missingFields));
-      let updated = patchStep({
-        ...run,
-        status: missing.length ? "waiting_input" : "draft",
-        pricingDefaults: defaults,
-        pricingSkus: records,
-        pricingSummary: summarizePricing(records),
-        pricingConfirmed: missing.length === 0,
-        publishPrice: uniformPrice,
-        requiredInput: missing.length ? { kind: "pricing", prompt: "仍有数据无法自动取得，请补充后再确认。", missing } : undefined,
-        confirmationKind: undefined,
-        editPreview: undefined,
-        error: undefined,
-      }, "pricing", {
-        status: missing.length ? "pending" : "completed",
-        detail: missing.length ? `仍缺少 ${missing.length} 类关键数据` : `已确认 ${records.length} 个 SKU 的成本和预估利润`,
-        ...(missing.length ? {} : { completedAt: now }),
-      });
-      updated = patchStep(updated, "edit", {
-        status: "pending",
-        detail: removedSkuKeys.size ? `已移除 ${removedSkuKeys.size} 个 SKU，准备重新生成编辑预览` : "利润数据已更新，准备重新生成编辑预览",
-        error: undefined,
-        startedAt: undefined,
-        completedAt: undefined,
-      });
-      return updated;
-    }));
-    if (next.pricingSkus) this.skuPricingStore.upsert(next.pricingSkus);
-    return next.status === "draft" ? this.run(id) : next;
-  }
-
   async approve(id: string): Promise<ProductPublishWorkflowRun> {
     const pending = await this.requireRun(id);
     if (pending.status === "waiting_confirmation" && pending.confirmationKind === "workflow_start") {
@@ -974,7 +843,7 @@ export class ProductPublishWorkflowEngine {
     if (pending.status === "waiting_confirmation" && pending.confirmationKind === "product_edit") {
       const saved = await this.locks.withLock(id, async () => {
         const run = await this.requireRun(id);
-        if (!run.platformDetailId || !run.shopId || (!run.publishPrice && !run.pricingSkus?.length) || !this.tools.saveEdit) {
+        if (!run.platformDetailId || !run.shopId || !run.publishPrice || !this.tools.saveEdit) {
           throw new Error("任务缺少商品、店铺或售价，不能保存编辑。");
         }
         await this.update(id, (current) => patchStep({ ...current, status: "running", error: undefined }, "edit", {
@@ -984,9 +853,7 @@ export class ProductPublishWorkflowEngine {
           await this.tools.saveEdit({
             platformDetailId: run.platformDetailId,
             shopId: run.shopId,
-            publishPrice: run.publishPrice ?? run.pricingSkus![0].input.salePriceThb,
-            skuPrices: Object.fromEntries((run.pricingSkus ?? []).map((record) => [record.skuKey, record.input.salePriceThb])),
-            selectedSkuKeys: run.pricingSkus?.map((record) => record.skuKey),
+            publishPrice: run.publishPrice,
             packageDimensions: run.packageDimensions,
             title: run.requestedTitle,
             description: run.requestedDescription,
@@ -1161,7 +1028,7 @@ export class ProductPublishWorkflowEngine {
           shopName: shop.name,
           shopSite: shop.site,
           miaoshouShopId: shop.miaoshouShopId,
-          targetLanguage: LANGUAGE_BY_SITE[shop.site] ?? "en",
+          targetLanguage: languageForSite(shop.site),
           requiredInput: undefined,
         }, "prepare", {
           status: "completed",
@@ -1222,7 +1089,7 @@ export class ProductPublishWorkflowEngine {
         const enriched = await this.tools.enrich({
           platformDetailId: run.platformDetailId!,
           shopId: shopIdForMiaoshou,
-          targetLanguage: run.targetLanguage ?? "en",
+          targetLanguage: run.targetLanguage ?? PRIMARY_LANGUAGE,
           shopName: run.shopName,
           region: run.shopSite,
         });
@@ -1239,43 +1106,6 @@ export class ProductPublishWorkflowEngine {
         }));
       }
 
-      currentStep = "pricing";
-      if (this.tools.preparePricing && !run.pricingSkus?.length) {
-        run = await this.startStep(id, "pricing", "正在读取 1688 采购价、SKU 重量和泰国类目费率");
-        const pricing = await this.tools.preparePricing(run);
-        run = await this.update(id, (current) => patchStep({
-          ...current,
-          pricingDefaults: pricing.defaults,
-          pricingSkus: pricing.records,
-          pricingSummary: summarizePricing(pricing.records),
-          pricingConfirmed: false,
-        }, "pricing", {
-          status: "pending",
-          detail: `已自动计算 ${pricing.records.length} 个 SKU，等待核对`,
-        }));
-        this.skuPricingStore.upsert(pricing.records);
-      }
-      if (this.tools.preparePricing && run.pricingSkus?.length && !run.pricingConfirmed) {
-        const missing = unique(run.pricingSkus.flatMap((record) => record.missingFields));
-        const lossCount = run.pricingSkus.filter((record) => !record.result.profitable).length;
-        const prompt = missing.length
-          ? `有 ${missing.length} 类数据无法自动取得，请补充后确认。`
-          : lossCount
-            ? `已自动取数并计算完成，但有 ${lossCount} 个 SKU 按当前售价会亏损。请调整售价或成本后确认。`
-            : "已自动取数并计算完成。请核对默认成本、广告和达人佣金后确认。";
-        return this.update(id, (current) => patchStep({
-          ...current,
-          status: "waiting_input",
-          requiredInput: { kind: "pricing", prompt, missing },
-          summary: `已建立 ${run.pricingSkus!.length} 个 SKU 的独立成本与利润记录。`,
-        }, "pricing", { status: "pending", detail: "等待确认成本和利润" }));
-      }
-      if (!this.tools.preparePricing && run.steps.find((step) => step.id === "pricing")?.status !== "completed") {
-        run = await this.update(id, (current) => patchStep(current, "pricing", {
-          status: "completed", detail: "当前工具未启用逐 SKU 利润计算", completedAt: new Date().toISOString(),
-        }));
-      }
-
       currentStep = "edit";
       if (!this.tools.prepareEdit && run.steps.some((step) => step.id === "edit") && run.steps.find((step) => step.id === "edit")?.status !== "completed") {
         run = await this.update(id, (current) => patchStep(current, "edit", {
@@ -1283,7 +1113,7 @@ export class ProductPublishWorkflowEngine {
         }));
       }
       if (this.tools.prepareEdit && run.steps.some((step) => step.id === "edit") && run.steps.find((step) => step.id === "edit")?.status !== "completed") {
-        if (!run.publishPrice && !run.pricingSkus?.length) {
+        if (!run.publishPrice) {
           return this.update(id, (current) => patchStep({
             ...current,
             status: "waiting_input",
@@ -1291,16 +1121,14 @@ export class ProductPublishWorkflowEngine {
             summary: "商品已经采集、认领并完成自动补全，等待你填写售价后生成编辑预览。",
           }, "edit", { status: "pending", detail: "等待填写售价" }));
         }
-        const publishPrice = run.publishPrice ?? run.pricingSkus![0].input.salePriceThb;
-        const skuPrices = Object.fromEntries((run.pricingSkus ?? []).map((record) => [record.skuKey, record.input.salePriceThb]));
+        // 先取出售价再 startStep：run 会被重新赋值，窄化会因此丢失
+        const publishPrice = run.publishPrice;
         const shopIdForMiaoshou = run.miaoshouShopId || run.shopId!;
         run = await this.startStep(id, "edit", "正在读取最新商品详情并生成变更预览");
         const preview = await this.tools.prepareEdit({
           platformDetailId: run.platformDetailId!,
           shopId: shopIdForMiaoshou,
           publishPrice,
-          skuPrices,
-          selectedSkuKeys: run.pricingSkus?.map((record) => record.skuKey),
           packageDimensions: run.packageDimensions,
           title: run.requestedTitle,
           description: run.requestedDescription,
@@ -1334,7 +1162,7 @@ export class ProductPublishWorkflowEngine {
         const readiness = await this.tools.diagnose({
           platformDetailId: run.platformDetailId!,
           shopId: shopIdForMiaoshou,
-          site: run.shopSite ?? "TH",
+          site: run.shopSite ?? PRIMARY_SITE,
         });
         run = await this.update(id, (current) => patchStep({
           ...current,
@@ -1403,20 +1231,6 @@ export class ProductPublishWorkflowEngine {
         error: expired ? "发布结果核验超时" : undefined,
         tiktokProductId: verification.productId ?? current.tiktokProductId,
         productTitle: verification.productTitle ?? current.productTitle,
-        pricingSkus: current.pricingSkus && verification.productId
-          ? (() => {
-            const records = current.pricingSkus ?? [];
-            const tiktokSkus = verification.skus ?? verification.skuIds?.map((id) => ({ id }));
-            return records.map((record, index) => ({
-              ...record,
-              tiktokProductId: verification.productId ?? record.tiktokProductId,
-              tiktokSkuId: tiktokSkus?.length
-                ? matchTikTokSkuId(record, index, tiktokSkus, records.length) ?? record.tiktokSkuId
-                : record.tiktokSkuId,
-              calculatedAt: verification.productId ? new Date().toISOString() : record.calculatedAt,
-            }));
-          })()
-          : current.pricingSkus,
         warnings: current.warnings.filter((warning) => {
           if (warning.startsWith("发布结果核验失败：")) return false;
           if (verification.productId && /类目自动匹配失败|没有返回类目编号/.test(warning)) return false;
@@ -1429,7 +1243,6 @@ export class ProductPublishWorkflowEngine {
         error: expired ? "发布结果核验超时" : undefined,
         ...(verification.matched ? { completedAt: new Date().toISOString() } : {}),
       }));
-      if (updated.pricingSkus) this.skuPricingStore.upsert(updated.pricingSkus);
       return updated;
     } catch (error) {
       return this.update(id, (current) => patchStep({

@@ -1,8 +1,9 @@
 import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode } from "react";
-import { ArrowRight, ArrowUp, ArrowUpRight, BarChart3, CheckCircle2, ChevronDown, CircleDollarSign, ClipboardCheck, ImagePlus, LoaderCircle, PackageSearch, Percent, Square, Workflow, X, XCircle } from "lucide-react";
+import { ArrowRight, ArrowUp, ArrowUpRight, BarChart3, CheckCircle2, ChevronDown, ClipboardCheck, ImagePlus, LoaderCircle, PackageSearch, Percent, Square, Workflow, X, XCircle } from "lucide-react";
 import type { ChatImageAttachment, ChatMessage, RunStep } from "../../shared/contracts";
 import { getDigitalEmployee, type AgentContext } from "../../shared/digital-employees";
 import { useChatStreaming } from "../streaming-store";
+import { AgentTrace } from "./AgentTrace";
 import { ArtifactRenderer } from "./ArtifactRenderer";
 
 interface ChatWorkspaceProps {
@@ -25,7 +26,7 @@ const WORKBENCH_ACTIONS = [
   { title: "检查今日经营重点", description: "汇总销售、库存与需要优先处理的问题", prompt: "检查当前最需要处理的经营问题", icon: ClipboardCheck },
   { title: "分析近 7 天销售", description: "查看销售额、订单和商品表现变化", prompt: "分析最近 7 天店铺销售表现", icon: BarChart3 },
   { title: "检查商品库存", description: "查看全部商品并识别库存不足的 SKU", prompt: "查看全部商品库存", icon: PackageSearch },
-  { title: "排查亏损商品", description: "找出预计利润不足或可能亏损的商品", prompt: "找出预计亏损的商品", icon: CircleDollarSign },
+  { title: "诊断商品质量", description: "检查在售商品的标题、类目和属性是否完整", prompt: "诊断在售商品信息质量", icon: CheckCircle2 },
   { title: "查看当前促销", description: "检查正在进行和即将开始的店铺活动", prompt: "查看当前促销活动", icon: Percent },
   { title: "查看最近任务", description: "了解数字员工任务的最新执行进度", prompt: "查看最近业务任务", icon: Workflow },
 ] as const;
@@ -340,10 +341,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({ messages, sending, co
               {streamingContent ? (
                 <div className="message-copy streaming-text">{streamingContent}<span className="typing-cursor" /></div>
               ) : (
-                <div className="agent-working"><LoaderCircle size={16} className="spin" /><span>{employee.workingLabel}</span></div>
-              )}
-              {streamingSteps && streamingSteps.length > 0 && (
-                <RunSteps steps={streamingSteps} open />
+                <AgentTrace steps={streamingSteps ?? []} activity={streaming?.activity} />
               )}
             </div>
           </article>

@@ -20,12 +20,12 @@ describe("Agent intelligence store", () => {
 
   it("retrieves relevant knowledge for the active Agent scope", () => {
     const global = store.createKnowledge({
-      title: "泰国商品上架利润规则",
+      title: "日本商品上架利润规则",
       content: "商品预计净利润小于零时不建议上架；成本缺失时只能标记为待确认。",
       category: "business_rule",
       scope: "global",
       source: "经营规则",
-      tags: ["泰国", "利润", "上架"],
+      tags: ["日本", "利润", "上架"],
     });
     store.createKnowledge({
       title: "商品资料命名约定",
@@ -44,7 +44,7 @@ describe("Agent intelligence store", () => {
       tags: ["达人"],
     });
 
-    const generalMatches = store.searchKnowledge("泰国商品上架应该如何判断利润", "general");
+    const generalMatches = store.searchKnowledge("日本商品上架应该如何判断利润", "general");
     expect(generalMatches[0].entry.id).toBe(global.id);
     expect(generalMatches.some((match) => match.entry.scope === "kol")).toBe(false);
     expect(store.searchKnowledge("达人邀约需要说明什么", "general").some((match) => match.entry.scope === "kol")).toBe(true);
@@ -55,28 +55,28 @@ describe("Agent intelligence store", () => {
 
   it("injects enabled prompt rules and cited knowledge into the LLM context", () => {
     store.createKnowledge({
-      title: "保本价计算口径",
-      content: "保本价必须包含采购、物流、税费和平台佣金。",
+      title: "商品标题规范",
+      content: "商品标题必须包含核心关键词，并符合目标语言的长度限制。",
       category: "business_rule",
-      scope: "pricing",
-      source: "财务口径 V1",
-      tags: ["保本价", "定价"],
+      scope: "product",
+      source: "商品口径 V1",
+      tags: ["标题", "商品"],
     });
     const custom = store.createPromptRule({
-      name: "定价方案比较",
-      instruction: "定价建议至少比较保本价和目标利润价。",
-      scope: "pricing",
+      name: "商品资料检查",
+      instruction: "商品资料提交前必须检查标题、类目和属性。",
+      scope: "product",
       priority: 80,
     });
 
-    const context = store.buildPromptContext("帮我计算这个 SKU 的保本价", "pricing");
+    const context = store.buildPromptContext("帮我检查这个商品标题", "product");
     expect(context).toContain("经营决策输出标准");
-    expect(context).toContain("定价建议至少比较保本价和目标利润价");
-    expect(context).toContain("保本价计算口径");
-    expect(context).toContain("财务口径 V1");
+    expect(context).toContain("商品资料提交前必须检查标题、类目和属性");
+    expect(context).toContain("商品标题规范");
+    expect(context).toContain("商品口径 V1");
 
     store.updatePromptRule(custom.id, { enabled: false });
-    expect(store.buildPromptContext("帮我计算这个 SKU 的保本价", "pricing")).not.toContain("定价建议至少比较保本价和目标利润价");
+    expect(store.buildPromptContext("帮我检查这个商品标题", "product")).not.toContain("商品资料提交前必须检查标题、类目和属性");
   });
 
   it("keeps built-in prompt rules recoverable while allowing custom rules to be deleted", () => {

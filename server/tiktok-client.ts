@@ -15,9 +15,21 @@ interface TikTokRequestOptions {
   body?: unknown;
   query?: Record<string, string>;
   shopScoped?: boolean;
+  /**
+   * 网络超时 / 限流 / 5xx 时的重试次数。默认 0。
+   * 只有幂等的只读查询应该传这个值；写操作保持 0，避免重复提交。
+   */
+  retry?: number;
 }
 
 export class TikTokConfigurationError extends Error {}
+
+/** 可安全重试的临时性失败（网络超时、限流、服务端 5xx）。 */
+export class TikTokTransientError extends Error {}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * TikTok Shop 签名算法:
@@ -73,6 +85,22 @@ export class TikTokShopClient {
   }
 
   async request<T>(path: string, options: TikTokRequestOptions = {}): Promise<T> {
+    const retries = Math.max(0, Math.min(3, Math.floor(options.retry ?? 0)));
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        return await this.requestOnce<T>(path, options);
+      } catch (error) {
+        lastError = error;
+        if (attempt === retries || !(error instanceof TikTokTransientError)) break;
+        // 指数退避 + 抖动，避免多个并发请求在同一时刻一起重试
+        await sleep(400 * 2 ** attempt + Math.floor(Math.random() * 250));
+      }
+    }
+    throw lastError;
+  }
+
+  private async requestOnce<T>(path: string, options: TikTokRequestOptions = {}): Promise<T> {
     const method = options.method ?? "GET";
     const timestamp = Math.floor(Date.now() / 1000).toString();
     const query = {
@@ -99,7 +127,7 @@ export class TikTokShopClient {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch {
-      throw new Error("连接 TikTok Shop API 超时，请稍后重试。");
+      throw new TikTokTransientError("连接 TikTok Shop API 超时，请稍后重试。");
     }
 
     let payload: T & { code?: number; message?: string; request_id?: string };
@@ -109,7 +137,9 @@ export class TikTokShopClient {
       throw new Error("TikTok Shop API 返回了无法识别的数据。");
     }
     if (!response.ok || (payload.code !== undefined && payload.code !== 0)) {
-      throw new Error(payload.message ?? `TikTok Shop API request failed (${response.status})`);
+      const message = payload.message ?? `TikTok Shop API request failed (${response.status})`;
+      if (response.status === 429 || response.status >= 500) throw new TikTokTransientError(message);
+      throw new Error(message);
     }
     return payload;
   }

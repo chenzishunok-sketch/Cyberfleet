@@ -6,6 +6,7 @@ import { formatMemoryForPrompt } from "./memory.ts";
 import { getLlmRuntimeConfig } from "./llm-providers.ts";
 import { getSkillTools, getSkillAbilityDescriptions } from "./skill-registry.ts";
 import { getFastMossAbilityDescription, getFastMossTools } from "./mcp-client.ts";
+import { getChuhaijiangAbilityDescription } from "./chuhaijiang-client.ts";
 import { intelligenceStore } from "./intelligence-store.ts";
 import { agentRegistry } from "./agent-registry.ts";
 
@@ -548,7 +549,7 @@ export async function generateContentText(input: {
   const intelligenceContext = intelligenceStore.buildPromptContext(input.prompt, "content");
   const result = await callLlmRaw({
     messages: [{ role: "user", content: input.prompt }],
-    systemPrompt: `你是跨境电商内容创作专家。请生成${kindLabel}，目标语言为${input.language || "泰语"}。${input.sku ? `关联 SKU：${input.sku}。` : ""}内容要真实、清晰、可直接使用，不要编造没有提供的产品参数。只输出成品内容。${intelligenceContext}`,
+    systemPrompt: `你是跨境电商内容创作专家。请生成${kindLabel}，目标语言为${input.language || "日语"}。${input.sku ? `关联 SKU：${input.sku}。` : ""}内容要真实、清晰、可直接使用，不要编造没有提供的产品参数。只输出成品内容。${intelligenceContext}`,
     maxTokens: 2_200,
   });
   const content = result.content?.trim();
@@ -575,6 +576,37 @@ export async function summarizeWebResearch(question: string, research: WebSearch
   return content;
 }
 
+/**
+ * 用真实店铺数据写一段给用户看的回答。
+ * 只允许引用调用方传入的事实表，不允许编造；模型不可用时由调用方决定怎么降级。
+ * 存在的意义：以前「查到数据」这一步会直接返回一句写死的模板话，正文不是模型写的。
+ */
+export async function summarizeLiveShopData(input: {
+  question: string;
+  factSheet: string;
+}): Promise<string> {
+  const result = await callLlmRaw({
+    messages: [{
+      role: "user",
+      content: `用户问题：${input.question}\n\n真实数据（全部来自平台官方接口，任何数字都不得改动，也不得换算货币）：\n${input.factSheet}`,
+    }],
+    systemPrompt: `你是 TikTok Shop 店铺运营分析师。请直接用中文回答用户提出的这个问题。
+
+硬性要求：
+- 只能使用「真实数据」里的数字与事实。数据里没有的，就说“当前接口没有返回这项数据”，绝不猜测或补全
+- 第一句必须直接给结论。禁止出现“我已读取数据”“请查看上方结果”“任务完成”“已为你汇总”这类空话
+- 结论之后给依据，再从数据里能看出的问题给 1~2 条可执行建议
+- 数字原样引用，不做汇率换算、不做四舍五入、不改变量纲
+- 纯中文段落，不用 Markdown 标题、加粗和表格；可以用“①②③”分点
+- 全文 120~260 个汉字`,
+    model: fastModel(),
+    maxTokens: 700,
+  });
+  const content = result.content?.trim();
+  if (!content) throw new Error("模型没有返回经营解读。");
+  return content;
+}
+
 // ─── 单步意图路由（原有功能，增加记忆支持） ────────────────────
 
 export function hasLlmConfiguration(): boolean {
@@ -593,6 +625,7 @@ export async function decideWithLlm(request: ChatRequest, memoryContext?: string
   const memory = memoryContext ?? "";
   const skillAbility = await getSkillAbilityDescriptions();
   const fastmossAbility = await getFastMossAbilityDescription();
+  const chuhaijiangAbility = await getChuhaijiangAbilityDescription();
   const skillTools = await getSkillTools();
   const fastmossTools = await getFastMossTools();
   // 按 Agent 能力过滤工具集：非运营总监只看到自己有权使用的工具
@@ -606,7 +639,7 @@ export async function decideWithLlm(request: ChatRequest, memoryContext?: string
     ],
     // 稳定前缀优先：ROUTER_SYSTEM_PROMPT + skillAbility + fastmossAbility 大多数请求不变，
     // 放前面可命中 LLM 供应商 prefix cache，减少 prefill 延迟；随请求变化的 role/memory 放后面
-    systemPrompt: ROUTER_SYSTEM_PROMPT + skillAbility + fastmossAbility + agentRolePrompt(request) + memory,
+    systemPrompt: ROUTER_SYSTEM_PROMPT + skillAbility + fastmossAbility + chuhaijiangAbility + agentRolePrompt(request) + memory,
     toolDefs: filteredTools,
     toolChoice: "required",
     model: fastModel(),
@@ -633,7 +666,7 @@ const AGENT_SYSTEM_PROMPT = `你是 TikTok Shop 的智能运营 Agent。你可�
 - 如果用户要建议，必须基于数据给出具体的、可操作的建议（至少 2 条具体动作）
 - 如果用户要分析，必须给出有深度的分析结论（趋势、问题、机会各至少 1 点），而不是罗列数字
 - 如果用户问市场/选品，必须给出：竞争格局（头部集中/分散）+ 热门方向/品类关键词 + TOP3 样本 + 具体建议，4 要素缺 1 补 1
-- 【类目匹配·最高优先】如果用户明确问某个类目/品类/赛道（如"家纺布艺在泰国市场"、"美妆怎么样"）：
+- 【类目匹配·最高优先】如果用户明确问某个类目/品类/赛道（如"家纺布艺在日本市场"、"美妆怎么样"）：
   - ① 读取榜单后先检查前 10 名里有没有该类目商品（通过标题/类目名关键词判断）
   - ② 如果命中不到 25%，绝对不能把其他类目的数据（香水、iPhone、服装等）硬套成该类目的竞争分析
   - ③ 必须在回答开头明确说明："当前官方 Bestsellers 返回的是全品类热销榜，XX 类命中不足 25%，不会拿无关数据误导你"，然后给出两条针对性建议：(a) 如何拿到该类目真正的榜单（类目树+类目ID+搜索接口），(b) 现有样本不足时的替代切入方案
@@ -648,6 +681,9 @@ const AGENT_SYSTEM_PROMPT = `你是 TikTok Shop 的智能运营 Agent。你可�
 - 不存在分析/执行模式切换，不得要求用户切换模式，也不得通过聊天文本绕过审核按钮直接批准或重试写任务
 - 缺少价格、时间、库存、店铺或商品编号时，必须询问用户，不能猜测
 - 可以在同一步同时调用多个互不依赖的只读查询工具（如同时查销售和库存），减少往返；写操作仍必须单独调用
+- 同一个只读工具在同一次对话里只调用一次。get_sales_overview 已经包含订单、GMV、退款、客单价四项指标，
+  不要再用 get_order_summary、get_gmv_summary、get_refund_summary 重复取同一份数据；list_products 也不要反复调用。
+  重复调用拿不到新数据，只会让用户多等几十秒
 - 当收集到足够信息后，必须使用 respond 工具给出最终回答，不要只停留在查数据阶段
 - 最终回答最低标准：长度不少于 80 个中文字；如果生成了更短的回答，视为回答不完整，需要补充分析和建议
 - 如果你是运营总监 Agent，遇到需要专业领域执行的任务（如定价计算、达人筛选、上架发布），可以使用 delegate_to_agent 工具把子任务委派给对应的专业 Agent，然后基于委派结果给出综合回答`;
@@ -674,15 +710,24 @@ export async function reactLoop(
   const filteredTools = agentRegistry.filterToolsForAgent(context, allTools as Array<{ function: { name: string } }>);
   const skillAbility = await getSkillAbilityDescriptions();
   const fastmossAbility = await getFastMossAbilityDescription();
+  const chuhaijiangAbility = await getChuhaijiangAbilityDescription();
 
   const steps: ReactStepResult[] = [];
   const reasoningModel = needsDeliberateReasoning(request.message) ? undefined : fastModel();
+  // 时间预算：没有这道闸，模型可以一路查下去，用户端能等到 100 秒以上还没出字。
+  // 超出预算就跳出循环，直接进入「用已有数据总结」那一段，保证一定会给出回答。
+  const budgetMs = Math.max(20_000, Number(process.env.REACT_BUDGET_MS ?? "") || 70_000);
+  const startedAt = Date.now();
 
   for (let step = 0; step < maxSteps; step++) {
+    if (steps.length > 0 && Date.now() - startedAt > budgetMs) {
+      console.warn(`[ReAct] 已用 ${Math.round((Date.now() - startedAt) / 1000)}s，超出 ${Math.round(budgetMs / 1000)}s 预算，提前收敛`);
+      break;
+    }
     const result = await callLlmRaw({
       messages,
       // 稳定前缀优先，命中 prefix cache；role/memory 放后面
-      systemPrompt: AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + agentRolePrompt(request) + memory,
+      systemPrompt: AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + chuhaijiangAbility + agentRolePrompt(request) + memory,
       toolDefs: filteredTools,
       toolChoice: "required",
       model: reasoningModel ?? (step === 0 ? fastModel() : undefined),
@@ -743,7 +788,7 @@ export async function reactLoop(
 
   const finalResult = await callLlmRaw({
     messages,
-    systemPrompt: AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + memory,
+    systemPrompt: AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + chuhaijiangAbility + memory,
     toolDefs: filteredTools,
     toolChoice: "required",
     model: reasoningModel,

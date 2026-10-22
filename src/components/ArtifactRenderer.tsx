@@ -249,10 +249,7 @@ export function ArtifactRenderer({ artifact, busyActionId, onApprove, onReject, 
         </div>
 
         <div className="sourcing-assumptions">
-          <span>税率估算 {(artifact.assumptions.taxRate * 100).toFixed(2)}%</span>
-          <span>平台佣金 {(artifact.assumptions.categoryCommissionRate * 100).toFixed(2)}%</span>
-          <span>买家当地配送 {artifact.assumptions.buyerLocalDeliveryThb.toFixed(0)} THB</span>
-          <span>{artifact.assumptions.requestedSalePriceThb ? `指定售价 ${artifact.assumptions.requestedSalePriceThb.toFixed(2)} THB` : `目标利润率 ${(artifact.assumptions.targetMargin * 100).toFixed(0)}%`}</span>
+          <span>{artifact.costNote}</span>
         </div>
 
         <div className="sourcing-candidate-grid">
@@ -271,18 +268,13 @@ export function ArtifactRenderer({ artifact, busyActionId, onApprove, onReject, 
                   {candidate.supplierType === "生产工厂" ? <Factory size={14} /> : <PackageCheck size={14} />}
                   <strong>{candidate.supplierName}</strong>
                   <span>{candidate.supplierLocation}</span>
+                  <span>{candidate.repurchaseRate === undefined ? "回头率 --" : `回头率 ${(candidate.repurchaseRate * 100).toFixed(0)}%`}{candidate.shopYears ? ` · ${candidate.shopYears} 年店` : ""}</span>
                 </div>
                 <div className="candidate-facts">
                   <div><span>采购价</span><strong>¥{candidate.purchasePriceCny.toFixed(2)}</strong><small>{candidate.minimumOrderQuantity} 件起</small></div>
+                  <div><span>到岸成本</span><strong>¥{candidate.landedCostCny.toFixed(2)}</strong><small>{candidate.domesticShippingCny > 0 ? `含国内运费 ¥${candidate.domesticShippingCny.toFixed(2)}` : "未含国内运费"}</small></div>
                   <div><span>参考销量</span><strong>{candidate.salesCount.toLocaleString("zh-CN")}</strong><small>{candidate.ordersCount.toLocaleString("zh-CN")} 笔订单</small></div>
                   <div><span>重量</span><strong>{candidate.weightKg.toFixed(3)} kg</strong><small>{candidate.weightEstimated ? "暂估" : "货源数据"}</small></div>
-                  <div><span>回头率</span><strong>{candidate.repurchaseRate === undefined ? "--" : `${(candidate.repurchaseRate * 100).toFixed(0)}%`}</strong><small>{candidate.shopYears ? `${candidate.shopYears} 年店` : candidate.supplierType}</small></div>
-                </div>
-                <div className={`candidate-profit ${candidate.expectedProfitThb < 0 ? "candidate-profit--loss" : ""}`}>
-                  <div><span>{artifact.assumptions.requestedSalePriceThb ? "计算售价" : "建议售价"}</span><strong>{candidate.salePriceThb.toFixed(2)} THB</strong></div>
-                  <div><span>预估利润</span><strong>{candidate.expectedProfitThb.toFixed(2)} THB</strong></div>
-                  <div><span>利润率</span><strong>{(candidate.expectedMargin * 100).toFixed(1)}%</strong></div>
-                  <div><span>保本售价</span><strong>{candidate.breakEvenPriceThb.toFixed(2)} THB</strong></div>
                 </div>
                 {(candidate.tags.length > 0 || candidate.warnings.length > 0) && (
                   <div className="candidate-notes">

@@ -13,7 +13,7 @@ import type {
 } from "../shared/contracts.ts";
 import { dashboard, cloneDashboard } from "./data.ts";
 import { handleDumateChat, isDumateConfigured, shouldRouteToDumate } from "./dumate-client.ts";
-import { decideWithLlm, hasLlmConfiguration, reactLoop, extractMemories, reflectOnResult, summarizeWebResearch, type AgentDecision, type ToolExecutorFn } from "./llm.ts";
+import { decideWithLlm, hasLlmConfiguration, reactLoop, extractMemories, reflectOnResult, summarizeWebResearch, summarizeLiveShopData, type AgentDecision, type ToolExecutorFn } from "./llm.ts";
 import { loadMemory, formatMemoryForPrompt, addPreference, addInsight, recordOperation } from "./memory.ts";
 import { memoryLayer } from "./memory-layer.ts";
 import { recordDecisionOutcome } from "./learning-loop.ts";
@@ -29,6 +29,7 @@ import {
 } from "./tiktok-product-writes.ts";
 import { actionPlanStore } from "./action-plan-store.ts";
 import { inferTikTokSceneQuery, runTikTokSceneQuery, analyzeCategoryTrack, type TikTokSceneQuery } from "./tiktok-scenes.ts";
+import { detectRegion, mentionsRegion } from "./tiktok-sites.ts";
 import { inferMiaoshouSceneQuery, runMiaoshouSceneQuery, miaoshouSceneFollowUps, type MiaoshouSceneQuery } from "./miaoshou-scenes.ts";
 import { inferTmapiItemIntent, runTmapiItemScene } from "./tmapi-scenes.ts";
 import { hasTmapiConfiguration } from "./tmapi-client.ts";
@@ -39,11 +40,9 @@ import { startFlashSaleWorkflow } from "./flash-sale-workflow.ts";
 import { kolBridge } from "./kol-bridge.ts";
 import { parseKolIntent } from "./kol-intents.ts";
 import { startKolOutreachWorkflow } from "./kol-outreach-workflow.ts";
-import { extract1688WorkflowInput, extractPricingUpdate, extractProductEditInput, parseFlashSaleIntent } from "./workflow-intents.ts";
+import { extract1688WorkflowInput, extractProductEditInput, parseFlashSaleIntent } from "./workflow-intents.ts";
 import { workflowCoordinator } from "./workflow-coordinator.ts";
-import { pricingStore } from "./pricing-store.ts";
-import { syncPricingFromTikTok } from "./pricing-sync.ts";
-import { editablePricingValues, pricingAgent } from "./pricing-agent.ts";
+
 import { inferSourcingIntent, runSourcingSearch } from "./sourcing-agent.ts";
 import { intelligenceStore } from "./intelligence-store.ts";
 import { formatWebSearchForLlm, formatWebSearchForUser, hasWebSearchConfiguration, inferExplicitWebSearch, needsDeepWebAnalysis, searchWeb } from "./web-search-client.ts";
@@ -129,23 +128,6 @@ function workflowStatusText(run: Awaited<ReturnType<typeof workflowFromText>>): 
 }
 
 async function handleWorkflowNaturalLanguage(request: ChatRequest): Promise<ChatResponse | undefined> {
-  const pricingInput = extractPricingUpdate(request.message);
-  if (pricingInput && (workflowReference(request.message) || /(?:任务|刚才)/i.test(request.message))) {
-    const run = await workflowFromText(request.message);
-    if (run?.type === "product_publish" && run.requiredInput?.kind === "pricing" && run.pricingSkus?.length) {
-      try {
-        const next = await productPublishWorkflowEngine.updatePricingInput(run.id, {
-          defaults: pricingInput.defaults,
-          skus: Object.keys(pricingInput.skuValues).length
-            ? run.pricingSkus.map((record) => ({ skuKey: record.skuKey, values: pricingInput.skuValues }))
-            : undefined,
-        });
-        return { message: message(`已保存并重新计算每个 SKU。${workflowStatusText(next)}`, { kind: "workflow", run: next }), runId: randomUUID() };
-      } catch (error) {
-        return { message: message(error instanceof Error ? error.message : "无法更新 SKU 利润数据。", { kind: "workflow", run }), runId: randomUUID() };
-      }
-    }
-  }
   const productInput = extractProductEditInput(request.message);
   if (productInput && (workflowReference(request.message) || /(?:任务|刚才)/i.test(request.message))) {
     const run = await workflowFromText(request.message);
@@ -185,114 +167,6 @@ async function handleWorkflowNaturalLanguage(request: ChatRequest): Promise<Chat
   } catch (error) {
     return { message: message(error instanceof Error ? error.message : "任务操作失败。", { kind: "workflow", run }), runId: randomUUID() };
   }
-}
-
-async function handlePricingNaturalLanguage(request: ChatRequest): Promise<ChatResponse | undefined> {
-  const pricingInput = extractPricingUpdate(request.message);
-  const values = pricingInput ? editablePricingValues(pricingInput) : {};
-  if (Object.keys(values).length) {
-    try {
-      const plan = pricingAgent.prepare(request, values);
-      return {
-        message: message(
-          "我已生成本地成本修改确认卡。审核后只更新本系统的 SKU 台账，不会修改 TikTok 店铺。",
-          { kind: "approval", plan },
-          [
-            { id: "pricing-target", label: "识别目标 SKU", detail: `${plan.impactCount ?? 0} 个 SKU`, status: "done" },
-            { id: "pricing-snapshot", label: "锁定当前成本", detail: "批准前会再次校验", status: "done" },
-            { id: "pricing-approval", label: "生成确认卡", detail: "等待审核，不会修改 TikTok 店铺", status: "done" },
-          ],
-        ),
-        runId: randomUUID(),
-      };
-    } catch (error) {
-      return {
-        message: message(error instanceof Error ? error.message : "无法生成成本修改计划。", undefined, undefined,
-          ["查询哪些商品还缺成本", "导出全部 SKU 利润表"]),
-        runId: randomUUID(),
-      };
-    }
-  }
-
-  if (/(同步|刷新).*(商品管理|SKU|成本|利润|台账|TikTok\s*商品|店铺商品)/i.test(request.message)) {
-    try {
-      const result = await syncPricingFromTikTok();
-      return {
-        message: message(
-          `已同步在售商品 ${result.totalProducts} 个、${result.totalSkus} 个 SKU。新增 ${result.created}，更新 ${result.updated}，未变化 ${result.unchanged}；${result.missingCost} 个在售 SKU 仍待补成本。另保留 ${result.inactiveProducts} 个非在售商品、${result.inactiveSkus} 个历史 SKU。`,
-          undefined,
-          [
-            { id: "pricing-sync-read", label: "读取 TikTok 在售商品", detail: `${result.totalProducts} 个商品、${result.totalSkus} 个 SKU`, status: "done" },
-            { id: "pricing-sync-match", label: "匹配本地 SKU 台账", detail: `新增 ${result.created}，更新 ${result.updated}`, status: "done" },
-            { id: "pricing-sync-protect", label: "保护手工成本", detail: "未修改 TikTok 店铺和已有手工成本", status: "done" },
-          ],
-          ["查询哪些商品还缺成本", "导出全部 SKU 利润表"],
-        ),
-        runId: randomUUID(),
-      };
-    } catch (error) {
-      return { message: message(error instanceof Error ? error.message : "TikTok 商品同步失败。"), runId: randomUUID() };
-    }
-  }
-
-  if (!/(商品管理|SKU.*(?:利润|成本)|(?:利润|成本).*SKU|商品利润|成本利润|利润台账|导出.*(?:利润|成本)|缺(?:少)?成本|待补成本|亏损(?:商品|SKU)|预计亏损)/i.test(request.message)) return undefined;
-  const wantsDrafts = /(?:上架|商品|SKU)?草稿|待上架|未发布|1688.*(?:SKU|成本|利润)|(?:SKU|成本|利润).*1688/i.test(request.message);
-  const wantsInactive = /非在售|已下架|下架商品|停用商品|已删除商品/i.test(request.message);
-  const records = pricingStore.list().filter((record) => wantsDrafts
-    ? !(record.tiktokProductId && record.tiktokSkuId)
-    : wantsInactive
-      ? Boolean(record.tiktokProductId && record.tiktokSkuId && record.tiktokStatus === "INACTIVE")
-      : Boolean(record.tiktokProductId && record.tiktokSkuId)
-        && (record.tiktokStatus === "ACTIVATE" || !record.tiktokStatus));
-  const complete = records.filter((record) => record.missingFields.length === 0);
-  const missing = records.filter((record) => record.missingFields.length > 0);
-  const lossRecords = complete.filter((record) => !record.result.profitable);
-  const loss = lossRecords.length;
-  const productCount = new Set(records.map((record) =>
-    record.tiktokProductId ?? record.platformDetailId ?? record.sourceItemId ?? record.workflowId)).size;
-  const wantsExport = /导出|下载|excel|xlsx|csv/i.test(request.message);
-  const wantsMissing = /缺(?:少)?成本|待补成本|缺数据|未补全/i.test(request.message);
-  const wantsLoss = /亏损/i.test(request.message);
-  const visible = wantsMissing ? missing : wantsLoss ? lossRecords : records;
-  const scopeName = wantsDrafts ? "上架草稿" : wantsInactive ? "非在售" : "在售";
-  const exportScope = wantsDrafts ? "draft" : wantsInactive ? "inactive" : "store";
-  const content = wantsExport
-    ? records.length
-      ? `已经准备好 ${records.length} 个${scopeName} SKU 的记录。可直接[导出 Excel](/api/pricing/export.xlsx?scope=${exportScope})或[导出 CSV](/api/pricing/export.csv?scope=${exportScope})。`
-      : `目前还没有${scopeName} SKU 利润记录。`
-    : wantsMissing
-      ? `${scopeName}的 ${productCount} 个商品中，共有 ${missing.length} 个 SKU 缺少采购价或重量，补全后才能得到可信利润。`
-    : wantsLoss
-      ? complete.length ? `成本完整的 ${complete.length} 个 SKU 中，有 ${loss} 个预计亏损。` : "目前没有成本完整的 SKU，暂时不能判断亏损。"
-    : records.length
-      ? `${scopeName}共 ${productCount} 个商品、${records.length} 个 SKU；${complete.length} 个成本完整，${missing.length} 个待补成本，${loss} 个预计亏损。`
-      : `目前还没有${scopeName} SKU 利润记录。`;
-  return {
-    message: message(content, {
-      kind: "records",
-      headline: wantsMissing ? `${scopeName}待补成本 SKU` : wantsLoss ? `${scopeName}预计亏损 SKU` : `${scopeName} SKU 成本与预估利润`,
-      summary: records.length ? `${productCount} 个商品、${records.length} 个 SKU，${missing.length} 个待补成本，${loss} 个预计亏损` : "暂无记录",
-      columns: [
-        { key: "product", label: "商品" }, { key: "productId", label: "商品 ID" }, { key: "sku", label: "SKU" },
-        { key: "skuId", label: "SKU ID" }, { key: "sale", label: "售价" }, { key: "purchase", label: "采购价" },
-        { key: "weight", label: "重量" }, { key: "profit", label: "预估利润" }, { key: "status", label: "状态" },
-      ],
-      rows: visible.slice(0, 50).map((record) => ({
-        product: record.productTitle ?? "未命名商品",
-        productId: record.tiktokProductId ?? "待关联",
-        sku: record.skuName,
-        skuId: record.tiktokSkuId ?? record.skuKey,
-        sale: `${record.input.salePriceThb.toFixed(2)} THB`,
-        purchase: record.missingFields.includes("purchasePriceCny") ? "待补" : `${record.input.purchasePriceCny.toFixed(2)} CNY`,
-        weight: record.missingFields.includes("weightKg") ? "待补" : `${record.input.weightKg} kg`,
-        profit: record.missingFields.length ? "待补成本" : `${record.result.expectedProfitThb.toFixed(2)} THB`,
-        status: record.missingFields.length ? "缺成本" : record.result.profitable ? "盈利" : "亏损",
-      })),
-      source: "本地 SKU 利润台账",
-      emptyLabel: "暂无 SKU 利润记录",
-    }, undefined, wantsExport ? [] : ["导出全部 SKU 利润表", "查询哪些商品还缺成本", "找出预计亏损的商品"]),
-    runId: randomUUID(),
-  };
 }
 
 async function handleKolNaturalLanguage(request: ChatRequest): Promise<ChatResponse | undefined> {
@@ -663,23 +537,16 @@ function inferExplicitDecision(text: string): AgentDecision | undefined {
   const hasMarketKeyword = /(市场|大盘|大盘数据|趋势|海外|跨境|国别|站点|海外市场|region|market)/i.test(text);
   const hasCategoryKeyword = /(类目|品类|行业|赛道|类别|好卖|热销|选品|适合|切入|机会|竞争|集中度|推荐品|爆品)/i.test(text)
     || /(家[纺织纺]|家纺|布艺|床上|四件套|床笠|床垫|枕套|被|毛毯|地毯|窗帘|毛巾|浴巾|美妆|护肤|精华|乳液|面霜|口红|面膜|防晒|香水|彩妆|3c|数码|手机|平板|耳机|充电|充电宝|相机|手表|智能|电子|服装|服饰|衣服|男装|女装|童装|鞋|靴|包|帽|袜|内衣|皮带|家居|家具|家装|建材|厨房|卫浴|收纳|餐具|灯|灯具|食品|零食|饮料|生鲜|保健品|维生素|咖啡|茶|母婴|婴儿|宝宝|孕妇|奶粉|纸尿裤|玩具|运动|健身|户外|跑步|瑜伽|露营|钓鱼)/i.test(text);
-  const hasRegionKeyword = /(泰国|thai|thailand|印尼|indonesia|马来|malaysia|菲律宾|philippine|越南|vietnam|新加坡|singapore|英国|uk|美国|usa|中东|沙特|阿联酋|日本|韩国)/i.test(text);
+  const hasRegionKeyword = mentionsRegion(text);
 
   // ── 赛道分析意图：用户明确要分析某个类目/赛道的竞争格局 ──
   const wantsTrackAnalysis = /(分析|拆解|评估|调研|研究|看看|了解|讲讲|说说|介绍).*(类目|品类|行业|赛道|市场|格局|竞争|情况|状况|态势)|(类目|品类|行业|赛道).*(分析|拆解|评估|调研|研究|格局|竞争|情况|怎么样|如何)/i.test(text);
   // 注意：只匹配"品类/类目/赛道"维度的选品问题，避免把"哪些商品好卖"（本店商品查询）误判为赛道分析
   const wantsCategoryData = /((?:什么|哪些|哪个).*(?:品类|类目|赛道|行业|类别).*(?:好卖|热销|畅销|好做|怎么样|如何))|((?:好卖|热销|畅销|选品).*(?:品类|类目|赛道|行业|类别))|((?:想要|帮我|想|请).*(?:分析|看看|了解).*(?:家纺|美妆|3c|数码|服饰|家居|食品|母婴|运动))/i.test(text);
 
+  // 市场名识别集中在 tiktok-sites.ts：识别不出就留空，由场景层回落到店铺自己的站点。
   if (wantsTrackAnalysis || wantsCategoryData || ((hasMarketKeyword || hasCategoryKeyword) && hasRegionKeyword)) {
-    const region = /(泰国|thai)/i.test(text) ? "TH"
-      : /(印尼|indo)/i.test(text) ? "ID"
-      : /(马来)/i.test(text) ? "MY"
-      : /(菲律宾)/i.test(text) ? "PH"
-      : /(越南)/i.test(text) ? "VN"
-      : /(新加坡)/i.test(text) ? "SG"
-      : /(英国|uk)/i.test(text) ? "GB"
-      : /(美国|usa)/i.test(text) ? "US"
-      : "TH";
+    const region = detectRegion(text) ?? "";
 
     // 如果用户明确要分析赛道/类目 → 走深度分析（竞争格局+价格带+头部特征）
     if (wantsTrackAnalysis || wantsCategoryData || hasCategoryKeyword) {
@@ -707,7 +574,7 @@ function inferDecision(text: string): AgentDecision {
   // 兜底：绝对不能返回"我可以查询经营数据"这种无价值话术。
   // 先试店铺经营概况（有真实数据），再用通用的"帮你先看店铺基础数据+近7天销售走势"的有信息回答
   const lower = text.toLowerCase();
-  if (lower.length < 3) return { tool: "respond", args: { content: "请告诉我你的具体经营需求或查询目标，例如：看看泰国市场家纺布艺类目、店铺最近7天销售情况、生成经营周报。" } };
+  if (lower.length < 3) return { tool: "respond", args: { content: "请告诉我你的具体经营需求或查询目标，例如：看看日本市场家纺布艺类目、店铺最近7天销售情况、生成经营周报。" } };
   return { tool: "get_sales_overview", args: { days: 7 } };
 }
 
@@ -1241,6 +1108,82 @@ function liveReportArtifact(data: TikTokOperationalData, focus = "销售、商�
   };
 }
 
+// ─── 真实数据 → 事实表 → 模型写的回答 ───────────────────────────
+// 以前查到数据后直接返回一句写死的模板话（"我已从 TikTok Shop 读取近 7 天…"），
+// 气泡正文不是模型写的、也没有任何信息量。这里改成：先把真实数据整理成事实表，
+// 再让模型基于事实表写回答；模型不可用时退化成纯数字事实句（只有数字，不含判断）。
+function buildLiveFactSheet(data: TikTokOperationalData, extraFacts?: string): string {
+  const money = (amount: number) => new Intl.NumberFormat("zh-CN", {
+    style: "currency",
+    currency: data.currency,
+    maximumFractionDigits: 2,
+  }).format(amount);
+  const metric = (label: string) => data.dashboard.metrics.find((item) => item.label === label);
+  const metricLine = (label: string) => {
+    const item = metric(label);
+    if (!item) return `${label}：接口未返回`;
+    return `${label}：${item.value}${item.delta ? `（较前一周期 ${item.delta}）` : ""}`;
+  };
+  const topProducts = [...data.allProducts].sort((a, b) => b.units - a.units).slice(0, 5);
+  const inventory = data.allProducts.reduce((sum, product) => sum + product.stock, 0);
+  const risky = data.allProducts.filter((product) => product.status !== "healthy").slice(0, 5);
+  // 退款原因按接口原样聚合，不做归类改写
+  const reasonCounts = new Map<string, number>();
+  for (const detail of data.currentReturnDetails) {
+    const label = (detail.reasonText || detail.reason || "接口未给出原因").trim();
+    reasonCounts.set(label, (reasonCounts.get(label) ?? 0) + 1);
+  }
+  const reasonLine = [...reasonCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([label, count]) => `${label} ×${count}`)
+    .join("；");
+
+  return [
+    `店铺：${data.shop.name}；站点：${data.shop.region}；币种：${data.currency}；时区：${data.dashboard.store.timezone}`,
+    `统计区间：近 ${data.days} 天；Analytics 区间 ${data.analyticsPeriod.startDate} 至 ${data.analyticsPeriod.endDate}（最新可用日 ${data.analyticsPeriod.latestAvailableDate}）`,
+    `核心指标：${["支付 GMV", "订单数", "客单价", "退货退款申请"].map(metricLine).join("；")}`,
+    `订单口径：Order API 近 ${data.days} 天已支付订单 ${data.currentOrders} 个，前一周期 ${data.previousOrders} 个；Analytics 订单 ${data.analyticsCurrentOrders} 个，前一周期 ${data.analyticsPreviousOrders} 个`,
+    `退货退款：申请 ${data.currentReturns} 个（前一周期 ${data.previousReturns} 个），退款金额 ${money(data.currentRefundAmount)}（前一周期 ${money(data.previousRefundAmount)}）`,
+    reasonLine ? `退款原因（本周期接口返回）：${reasonLine}` : "",
+    `商品：在售 ${data.totalProducts} 个，SKU ${data.skuRows.length} 个，可售库存合计 ${inventory}`,
+    topProducts.length
+      ? `热销商品：${topProducts.map((product) => `${product.title.slice(0, 24)}（销量 ${product.units}，库存 ${product.stock}）`).join("；")}`
+      : "热销商品：接口未返回",
+    risky.length
+      ? `库存异常：${risky.map((product) => `${product.title.slice(0, 20)}（库存 ${product.stock}，${product.status}）`).join("；")}`
+      : "",
+    extraFacts ?? "",
+    `数据来源：${data.source}`,
+  ].filter(Boolean).join("\n");
+}
+
+/** 模型不可用时的降级句：只陈述接口返回的数字，不含任何判断。 */
+function liveFactHeadline(data: TikTokOperationalData): string {
+  const metric = (label: string) => data.dashboard.metrics.find((item) => item.label === label);
+  const gmv = metric("支付 GMV");
+  const orders = metric("订单数");
+  const average = metric("客单价");
+  const returns = metric("退货退款申请");
+  const parts = [
+    gmv && `支付 GMV ${gmv.value}${gmv.delta ? `（${gmv.delta}）` : ""}`,
+    orders && `订单 ${orders.value} 个${orders.delta ? `（${orders.delta}）` : ""}`,
+    average && `客单价 ${average.value}`,
+    returns && `退货退款申请 ${returns.value} 个`,
+  ].filter(Boolean);
+  return `近 ${data.days} 天（${data.shop.name} · ${data.shop.region}）：${parts.join("，")}。`;
+}
+
+async function composeLiveNarrative(data: TikTokOperationalData, originalText: string, extraFacts?: string): Promise<string> {
+  if (!hasLlmConfiguration()) return liveFactHeadline(data);
+  try {
+    return await summarizeLiveShopData({ question: originalText, factSheet: buildLiveFactSheet(data, extraFacts) });
+  } catch (error) {
+    console.warn("经营解读生成失败，退回纯数字事实句：", error instanceof Error ? error.message : error);
+    return liveFactHeadline(data);
+  }
+}
+
 async function renderLiveDecision(decision: AgentDecision, originalText: string): Promise<ChatMessage> {
   if (decision.tool === "respond") {
     const content = decision.args.content;
@@ -1300,7 +1243,7 @@ async function renderLiveDecision(decision: AgentDecision, originalText: string)
   // ─── run_tiktok_scene_query：LLM 503 时类目查询仍能拿到真实数据 ─────
   if (decision.tool === "run_tiktok_scene_query") {
     const scene = String(decision.args.scene ?? "market_products") as TikTokSceneQuery;
-    const regionArg = String(decision.args.region ?? "TH");
+    const regionArg = String(decision.args.region ?? "");
     const sceneDays = Math.max(1, Math.min(90, Number(decision.args.days) || 7));
     try {
       // region 只作为日志/标签用，真实 region 由 runTikTokSceneQuery 内部从已授权店铺读取
@@ -1323,7 +1266,7 @@ async function renderLiveDecision(decision: AgentDecision, originalText: string)
   // ─── analyze_category_track：赛道/类目深度分析（竞争格局+价格带+头部特征+进入建议） ─────
   if (decision.tool === "analyze_category_track") {
     const categoryText = String(decision.args.category ?? originalText);
-    const regionArg = String(decision.args.region ?? "TH");
+    const regionArg = String(decision.args.region ?? "");
     const trackDays = Math.max(1, Math.min(90, Number(decision.args.days) || 7));
     try {
       const result = await analyzeCategoryTrack(categoryText, regionArg, trackDays, originalText);
@@ -1346,41 +1289,44 @@ async function renderLiveDecision(decision: AgentDecision, originalText: string)
     }
   }
   const data = await getTikTokOperationalData(days);
+  // 只在真的要用时才生成解读，避免 get_shop_info 这类不需要分析的场景白花一次模型调用
+  let narrativeTask: Promise<string> | undefined;
+  const narrative = (extraFacts?: string) => {
+    if (extraFacts) return composeLiveNarrative(data, originalText, extraFacts);
+    return (narrativeTask ??= composeLiveNarrative(data, originalText));
+  };
   switch (decision.tool) {
     case "get_shop_info":
       return message(`当前连接的真实店铺是 ${data.shop.name}，站点为 ${data.dashboard.store.region} (${data.shop.region})，币种 ${data.currency}，时区 ${data.dashboard.store.timezone}。`, undefined, liveSteps("read", data));
     case "get_sales_overview":
-      return message(`我已从 TikTok Shop 读取近 ${days} 天的真实订单、商品和经营指标。`, liveSalesArtifact(data, originalText, "overview"), liveSteps("read", data));
+      return message(await narrative(), liveSalesArtifact(data, originalText, "overview"), liveSteps("read", data));
     case "get_order_summary":
-      return message(`我已单独查询 TikTok Shop 近 ${days} 天的订单。`, liveSalesArtifact(data, originalText, "orders"), liveSteps("read", data));
+      return message(await narrative(), liveSalesArtifact(data, originalText, "orders"), liveSteps("read", data));
     case "get_gmv_summary":
-      return message(`我已单独查询 TikTok Shop Analytics 的 GMV 数据。`, liveSalesArtifact(data, originalText, "gmv"), liveSteps("read", data));
+      return message(await narrative(), liveSalesArtifact(data, originalText, "gmv"), liveSteps("read", data));
     case "get_refund_summary":
-      return message(
-        /(原因|为什么|为何|分析|拆解|reason)/i.test(originalText)
-          ? "我已读取真实退货退款列表，并且只根据 API 实际返回的原因字段汇总。"
-          : `我已单独查询 TikTok Shop 近 ${days} 天的退货退款数据。`,
-        liveSalesArtifact(data, originalText, "refunds"),
-        liveSteps("read", data),
-      );
+      return message(await narrative(), liveSalesArtifact(data, originalText, "refunds"), liveSteps("read", data));
     case "explain_product_operations":
       return message(
-        "上架、下架接口已经接通；真正执行前仍需指定一个准确商品并确认变更计划。关于什么好卖，下面只按店铺真实订单判断。",
+        `上架、下架接口已经接通；真正执行前仍需指定一个准确商品并确认变更计划。\n${await narrative()}`,
         liveProductsArtifact(data, "top", originalText),
         liveSteps("read", data),
       );
     case "list_products": {
       const focus = resolveProductFocus(originalText, decision.args.focus);
+      // 用户点名了某个商品/SKU 时，把精确匹配到的商品事实一起交给模型，避免解读答偏
+      const matched = matchedProducts(data, originalText, decision.args.query);
+      const extraFacts = matched.length
+        ? `本次问题精确匹配到的商品：${matched.map((product) => `${product.title}（SKU ${product.sku}，可售库存 ${product.stock}，近 ${data.days} 天销量 ${product.units}，销售额 ${product.revenue}）`).join("；")}`
+        : undefined;
       return message(
-        focus === "top"
-          ? `我已按 TikTok Shop 近 ${days} 天真实订单检查店内热销商品。`
-          : "我已从 TikTok Shop 商品接口读取当前商品与 SKU 库存。",
+        await narrative(extraFacts),
         liveProductsArtifact(data, focus, originalText, decision.args.query),
         liveSteps("read", data),
       );
     }
     case "generate_operations_report":
-      return message("经营报告已按 TikTok Shop 当前真实数据生成。", liveReportArtifact(data, decision.args.focus), liveSteps("report", data));
+      return message(await narrative(), liveReportArtifact(data, decision.args.focus), liveSteps("report", data));
     default:
       return message("这项能力尚未接入真实 TikTok Shop 接口，本次没有返回演示结果。");
   }
@@ -1491,7 +1437,7 @@ function createLiveToolExecutor(request: ChatRequest): ToolExecutorFn {
         return `已创建供应商上架任务 ${run.id}，当前状态 ${run.status}。后续编辑保存和最终发布仍会分别等待确认。`;
       }
       case "start_flash_sale_workflow": {
-        const run = await startFlashSaleWorkflow({ ...decision.args, currency: decision.args.currency ?? "THB" });
+        const run = await startFlashSaleWorkflow({ ...decision.args, currency: decision.args.currency ?? "JPY" });
         return `已创建秒杀任务 ${run.id}，当前状态 ${run.status}。只读预检通过后会等待确认创建活动。`;
       }
       case "approve_workflow": {
@@ -1587,7 +1533,7 @@ function ensureDelegationHandlers(): void {
   delegationHandlersRegistered = true;
 
   // 通用委派处理器：用目标 Agent 的身份执行一个独立的查询/分析请求
-  const agentContexts: AgentContext[] = ["product", "pricing", "sourcing", "collection", "publishing", "kol", "content"];
+  const agentContexts: AgentContext[] = ["product", "sourcing", "collection", "publishing", "kol", "content"];
   for (const agentCtx of agentContexts) {
     registerDelegationHandler(agentCtx, async (request) => {
       const employee = getDigitalEmployee(agentCtx);
@@ -1690,9 +1636,6 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
   const workflowCommand = await handleWorkflowNaturalLanguage(request);
   if (workflowCommand) return workflowCommand;
 
-  const pricingCommand = await handlePricingNaturalLanguage(request);
-  if (pricingCommand) return pricingCommand;
-
   const kolCommand = await handleKolNaturalLanguage(request);
   if (kolCommand) return kolCommand;
 
@@ -1711,7 +1654,7 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
           { id: "image", label: "识别搜索图片", detail: "已上传并转换为 1688 可识别图片", status: "done" },
           { id: "search", label: "搜索1688同款", detail: `找到 ${result.artifact.totalCount} 个相似结果`, status: "done" },
           { id: "compare", label: "对比供应商", detail: `已补全 ${result.artifact.candidates.length} 个候选商品`, status: "done" },
-          { id: "profit", label: "估算泰国店铺利润", detail: "已计入采购、国内、云仓、跨境、当地配送及平台费用", status: "done" },
+          { id: "profit", label: "对比候选货源", detail: "已汇总采购价、起订量、销量、重量与供应商资质", status: "done" },
         ] : undefined,
       );
       void extractAndSaveMemory(request, responseMsg);
@@ -1809,6 +1752,8 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
           result.artifact,
           miaoshouQuerySteps(miaoshouQuery),
           followUps,
+          // 带上原问题：万一内容被判空泛，兜底文案里能引用用户真正问的那句话
+          request.message,
         );
         void extractAndSaveMemory(request, responseMsg);
         return { message: responseMsg, runId: randomUUID() };
@@ -1879,6 +1824,9 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
 
     const fastReadDecision = inferFastReadDecision(request.message);
     if (fastReadDecision) {
+      // 这条路径要打十几次官方接口，中间没有别的反馈，
+      // 先把"正在做什么"推给前端，避免用户面对一个转圈干等
+      emit?.({ type: "step", step: { id: "live-active", label: toolLabel(fastReadDecision.tool), detail: "正在读取 TikTok Shop 真实数据…", status: "running" } });
       const responseMsg = await renderLiveDecision(fastReadDecision, request.message);
       if (!responseMsg.followUps?.length) responseMsg.followUps = decisionFollowUps(fastReadDecision, request.message);
       void extractAndSaveMemory(request, responseMsg);
@@ -1909,6 +1857,8 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
         const agent = (request.context ?? "general") as AgentContext;
         const argsSummary = JSON.stringify(decision.args).slice(0, 100);
         const intent = request.message.slice(0, 80);
+        // 工具执行期间前端要能看到"正在查什么"，否则这段几十秒是空白的
+        emit?.({ type: "step", step: { id: "react-active", label: toolLabel(decision.tool), detail: "正在读取真实数据…", status: "running" } });
         try {
           const result = await rawToolExecutor(decision);
           recordDecisionOutcome(agent, decision.tool, argsSummary, intent, {
@@ -2089,28 +2039,6 @@ async function extractAndSaveMemory(request: ChatRequest, response: ChatMessage)
 }
 
 export async function approveAction(actionId: string): Promise<ActionResponse> {
-  const pricingAction = pricingAgent.get(actionId);
-  if (pricingAction) {
-    const result = pricingAgent.approve(actionId);
-    try {
-      recordOperation(`${result.plan.title}：${result.updated} 个 SKU 本地成本已更新`);
-    } catch {
-      // 本地操作已完成，记忆记录失败不影响台账。
-    }
-    return {
-      message: message("成本设置已写入本地 SKU 台账，所有受影响 SKU 的预估利润已经重新计算。", {
-        kind: "receipt",
-        actionId,
-        title: "SKU 成本设置已更新",
-        summary: `已更新 ${result.updated} 个 SKU。该审核计划已锁定，不能重复提交。`,
-        requestId: result.requestId,
-        requestLabel: "执行编号",
-        completedAt: result.completedAt,
-        diffs: result.plan.diffs,
-        verificationLabel: "已写入本地 SKU 台账并重新计算利润",
-      }),
-    };
-  }
   if (process.env.DEMO_MODE !== "true") {
     const miaoshouAction = getMiaoshouAction(actionId);
     if (miaoshouAction) {
@@ -2239,8 +2167,6 @@ export async function approveAction(actionId: string): Promise<ActionResponse> {
 }
 
 export function rejectAction(actionId: string): ActionPlan {
-  const pricingPlan = pricingAgent.reject(actionId);
-  if (pricingPlan) return pricingPlan;
   if (process.env.DEMO_MODE !== "true") {
     const miaoshouAction = getMiaoshouAction(actionId);
     if (miaoshouAction) {

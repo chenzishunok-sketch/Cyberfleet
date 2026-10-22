@@ -26,7 +26,7 @@ describe("web search client", () => {
     }), { status: 200, headers: { "content-type": "application/json" } }));
 
     const result = await searchWeb({
-      query: "TikTok Shop Thailand latest fees",
+      query: "TikTok Shop Japan latest fees",
       topic: "news",
       timeRange: "month",
       maxResults: 6,
@@ -41,7 +41,7 @@ describe("web search client", () => {
     expect(url).toBe("https://api.tavily.test/search");
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer tvly-test-key");
     expect(JSON.parse(String(init?.body))).toMatchObject({
-      query: "TikTok Shop Thailand latest fees",
+      query: "TikTok Shop Japan latest fees",
       topic: "news",
       time_range: "month",
       max_results: 6,
@@ -77,8 +77,8 @@ describe("web search client", () => {
   });
 
   it("recognizes an explicit natural-language web search request", () => {
-    expect(inferExplicitWebSearch("请联网搜索 TikTok Shop 泰国站最新政策")).toMatchObject({
-      query: "TikTok Shop 泰国站最新政策",
+    expect(inferExplicitWebSearch("请联网搜索 TikTok Shop 日本站最新政策")).toMatchObject({
+      query: "TikTok Shop 日本站最新政策",
       maxResults: 6,
     });
     expect(inferExplicitWebSearch("查询店铺近 7 天订单")).toBeUndefined();

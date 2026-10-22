@@ -5,7 +5,6 @@ import {
   ChevronDown,
   ChevronRight,
   CircleUserRound,
-  CircleDollarSign,
   FileImage,
   History,
   MessageSquareText,
@@ -24,7 +23,7 @@ import type { Conversation } from "../conversation-store";
 import { formatConversationTime } from "../conversation-store";
 import type { AgentContext } from "../../shared/digital-employees";
 
-export type ViewId = "chat" | "employees" | "intelligence" | "office" | "topology" | "content_create" | "content_assets" | "content_tasks" | "kol_chat" | "kol_creators" | "kol_tasks" | "kol_data" | "automations" | "pricing" | "reports" | "activity" | "settings";
+export type ViewId = "chat" | "employees" | "intelligence" | "office" | "topology" | "content_create" | "content_assets" | "content_tasks" | "kol_chat" | "kol_creators" | "kol_tasks" | "kol_data" | "automations" | "reports" | "activity" | "settings";
 
 interface SidebarProps {
   activeView: ViewId;
@@ -186,7 +185,6 @@ export function Sidebar({
             <section className="sidebar-nav-section" aria-labelledby="sidebar-work-label">
               <span className="sidebar-nav-label" id="sidebar-work-label">工作</span>
               <button className={`nav-item ${activeView === "chat" && activeWorkspace === "general" ? "nav-item--active" : ""}`} onClick={() => select("chat")}><MessageSquareText size={18} strokeWidth={1.8} /><span>工作台</span></button>
-              <button className={`nav-item ${activeView === "pricing" ? "nav-item--active" : ""}`} onClick={() => select("pricing")}><CircleDollarSign size={18} strokeWidth={1.8} /><span>商品管理</span></button>
               <div className="sidebar-nav-group">
                 <button className={`nav-item sidebar-nav-toggle ${activeView.startsWith("content_") ? "nav-item--active-parent" : ""}`} aria-expanded={expandedGroup === "content"} onClick={() => toggleGroup("content")}><FileImage size={18} strokeWidth={1.8} /><span>内容中心</span><ChevronDown size={15} className={`sidebar-collapse-chevron ${expandedGroup === "content" ? "" : "sidebar-collapse-chevron--collapsed"}`} /></button>
                 {expandedGroup === "content" && <div className="sidebar-subnav">

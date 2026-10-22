@@ -34,7 +34,7 @@ const OPENING_PATTERNS = [
   /^(?:我建议|我的判断|我的观点|首先|总体|核心|我的核心观点)[^。\n]{0,30}[，,\s]\s*(.+)/m,
 ];
 
-const DATA_NUMBER_PATTERN = /([\d,]+\.?\d*)\s*(M|B|K|万|千)?\s*(泰铢|人民币|美元|欧元|英镑|件|个|%|)?/g;
+const DATA_NUMBER_PATTERN = /([\d,]+\.?\d*)\s*(M|B|K|万|千)?\s*(日元|人民币|美元|欧元|英镑|件|个|%|)?/g;
 const CURRENCY_PATTERN = /([\u0E00-\u0E7F¥$€£])\s*([\d,.]+)\s*(M|B|K|万|千)?/g;
 const PERCENT_PATTERN = /([\d.]+)\s*%/g;
 const TREND_PATTERN = /(同比|环比)?\s*(上升|下降|增长|减少|降低|下滑|上涨|持平)\s*([\d.]+)\s*%/g;
@@ -274,6 +274,15 @@ export function tryBuildVisualArtifact(
     return undefined;
   }
 
+  // 只有文字类 callout、没有任何可“可视化”的数据段时，不应生成 visual_analysis 卡片：
+  // 否则会出现“标题是一整句话、数据格 rows=0”的空壳，用户看到的是个没有图的图表卡。
+  const hasVisualSection = result.sections.some(
+    (section) => section.type === "data_highlights" || section.type === "bar_chart" || section.type === "donut_chart",
+  );
+  if (!hasVisualSection) {
+    return undefined;
+  }
+
   const textOnlySections = result.sections.filter((s) => s.type !== "callout" || (s.title !== "核心结论" && s.title !== "行动建议"));
   const summary =
     textOnlySections.length > 0
@@ -289,11 +298,14 @@ export function tryBuildVisualArtifact(
       : content.slice(0, 200);
 
   const conclusionSection = result.sections.find((s) => s.type === "callout" && s.tone === "conclusion") as { body?: string } | undefined;
-  const recommendationSection = result.sections.find((s) => s.type === "callout" && s.tone === "recommendation") as { body?: string } | undefined;
-  const headline =
-    conclusionSection?.body?.slice(0, 40)
-    ?? recommendationSection?.body?.slice(0, 40)
-    ?? "数据分析洞察";
+  // 标题应是短小概括，不能是一整句话、也不能带数据。截到首个标点，再去掉数字/货币符号/百分比，
+  // 避免出现“本季度 GMV ¥1,234,567 较…”这种把一句话当标题的情况。
+  const headline = conclusionSection?.body
+    ?.replace(/[。；！？!?].*$/, "")
+    .replace(/[¥$€£฿]|[\d,.]+%?|[%]|[\d,.]+(?:M|B|K|万|千|亿)?/g, "")
+    .replace(/\s+/g, "")
+    .slice(0, 16)
+    || "数据分析洞察";
 
   return {
     kind: "visual_analysis",

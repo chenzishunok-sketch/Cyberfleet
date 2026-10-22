@@ -266,7 +266,7 @@ describe("ShopPilot API", () => {
       refreshTokenExpiresAt: now + 31536000,
       userType: 0,
       grantedScopes: ["seller.authorization.info", "seller.product.basic", "seller.product.write", "seller.order.info", "data.shop_analytics.public.read", "data.bestselling.public.read"],
-      shops: [{ id: "shop-real", name: "Real Shop", region: "TH", cipher: "real-cipher" }],
+      shops: [{ id: "shop-real", name: "Real Shop", region: "JP", cipher: "real-cipher" }],
       selectedShopCipher: "real-cipher",
       updatedAt: new Date().toISOString(),
     }));
@@ -283,8 +283,8 @@ describe("ShopPilot API", () => {
           title: "真实商品",
           status: "ACTIVATE",
           skus: [
-            { id: "sku-real", seller_sku: "REAL-SKU", inventory: [{ quantity: realStock }], price: { currency: "THB", sale_price: "99" } },
-            { id: "sku-blue", seller_sku: "REAL-BLUE", inventory: [{ quantity: 3 }], price: { currency: "THB", sale_price: "109" } },
+            { id: "sku-real", seller_sku: "REAL-SKU", inventory: [{ quantity: realStock }], price: { currency: "JPY", sale_price: "99" } },
+            { id: "sku-blue", seller_sku: "REAL-BLUE", inventory: [{ quantity: 3 }], price: { currency: "JPY", sale_price: "109" } },
           ],
         }] });
       }
@@ -299,13 +299,13 @@ describe("ShopPilot API", () => {
         performance: { intervals: [{
           start_date: "2026-07-25",
           end_date: "2026-07-25",
-          sales: { orders_count: 1, gmv: { overall: { amount: "100", currency: "THB" } }, refunds: { amount: "0", currency: "THB" } },
+          sales: { orders_count: 1, gmv: { overall: { amount: "100", currency: "JPY" } }, refunds: { amount: "0", currency: "JPY" } },
         }] },
       });
       if (url.pathname === "/analytics/202511/products/bestselling") return json({ products: [{
         rank: 1,
         name: "真实市场热销商品",
-        gmv_range: "THB1000~THB2000",
+        gmv_range: "JPY1000~JPY2000",
         shop_name: "真实市场店铺",
         rating: "4.9",
       }] });
@@ -315,8 +315,8 @@ describe("ShopPilot API", () => {
           title: "真实商品",
           status: "ACTIVATE",
           skus: [
-            { id: "sku-real", seller_sku: "REAL-SKU", inventory: [{ warehouse_id: "warehouse-real", quantity: realStock }], price: { currency: "THB", sale_price: "99" } },
-            { id: "sku-blue", seller_sku: "REAL-BLUE", inventory: [{ warehouse_id: "warehouse-real", quantity: 3 }], price: { currency: "THB", sale_price: "109" } },
+            { id: "sku-real", seller_sku: "REAL-SKU", inventory: [{ warehouse_id: "warehouse-real", quantity: realStock }], price: { currency: "JPY", sale_price: "99" } },
+            { id: "sku-blue", seller_sku: "REAL-BLUE", inventory: [{ warehouse_id: "warehouse-real", quantity: 3 }], price: { currency: "JPY", sale_price: "109" } },
           ],
           main_images: [{ thumb_urls: ["https://example.test/product.jpg"] }],
         });
@@ -338,10 +338,10 @@ describe("ShopPilot API", () => {
     const liveDashboard = await request(app).get("/api/dashboard").expect(200);
     expect(liveDashboard.body).toMatchObject({
       dataSource: "tiktok",
-      store: { id: "shop-real", name: "Real Shop", region: "泰国", currency: "THB" },
+      store: { id: "shop-real", name: "Real Shop", region: "日本", currency: "JPY" },
       products: [{ id: "product-real", title: "真实商品", sku: "2 个 SKU", stock: 11, units: 0 }],
     });
-    expect(liveDashboard.body.metrics.find((metric: { label: string; value: string }) => metric.label === "支付 GMV").value).toContain("100.00");
+    expect(liveDashboard.body.metrics.find((metric: { label: string; value: string }) => metric.label === "支付 GMV").value).toContain("100");
     expect(liveDashboard.body.metrics.find((metric: { label: string; value: string }) => metric.label === "订单数").value).toBe("0");
     expect(liveDashboard.body.salesSeries.at(-1).date).toBe("7/25");
     expect(productSearchBodies).toContainEqual({ status: "ACTIVATE" });
@@ -359,7 +359,7 @@ describe("ShopPilot API", () => {
     expect(compositeAnswer.body.message.artifact).toMatchObject({
       kind: "records",
       headline: "7 天市场热销商品",
-      rows: [{ rank: "1", name: "真实市场热销商品", gmv_range: "THB1000~THB2000" }],
+      rows: [{ rank: "1", name: "真实市场热销商品", gmv_range: "JPY1000~JPY2000" }],
     });
     expect(compositeAnswer.body.message.followUps).toHaveLength(3);
     expect(compositeAnswer.body.message.followUps).toContain("查看近 7 天市场热销达人");
@@ -387,7 +387,7 @@ describe("ShopPilot API", () => {
     expect(orderAnswer.body.message.followUps).not.toEqual(bestSellerAnswer.body.message.followUps);
 
     const gmvAnswer = await request(app).post("/api/chat").send({ message: "最近 7 天 GMV 是多少", storeId: "shop-real", mode: "analysis" }).expect(200);
-    expect(gmvAnswer.body.message.artifact.headline).toContain("100.00");
+    expect(gmvAnswer.body.message.artifact.headline).toContain("100");
     expect(gmvAnswer.body.message.artifact.metrics.map((metric: { label: string }) => metric.label)).toEqual(["支付 GMV", "客单价"]);
     expect(gmvAnswer.body.message.artifact.series.at(-1).date).toBe("7/25");
 
@@ -547,26 +547,26 @@ describe("ShopPilot API", () => {
     });
     await writeFile(path.join(authTestDirectory, "authorization.json"), JSON.stringify({
       version: 2,
-      selected: { grantId: "grant-th", shopId: "shop-th" },
+      selected: { grantId: "grant-jp", shopId: "shop-jp" },
       grants: [
-        grant("grant-th", "token-th", "Mikolo TH", [shop("shop-th", "Mikolo", "TH", "cipher-th")]),
+        grant("grant-jp", "token-jp", "Mikolo JP", [shop("shop-jp", "Mikolo", "JP", "cipher-jp")]),
         grant("grant-us", "token-us", "Mikolo US", [shop("shop-us", "Mikolo Store", "US", "cipher-us")]),
       ],
     }));
 
     const bindings = await request(app).get("/api/tiktok/bindings").expect(200);
     expect(bindings.body.bindings).toHaveLength(2);
-    expect(bindings.body.bindings.map((binding: { grantId: string }) => binding.grantId)).toEqual(["grant-th", "grant-us"]);
-    expect(bindings.body.tiktok).toMatchObject({ status: "connected", shopName: "Mikolo", region: "TH" });
+    expect(bindings.body.bindings.map((binding: { grantId: string }) => binding.grantId)).toEqual(["grant-jp", "grant-us"]);
+    expect(bindings.body.tiktok).toMatchObject({ status: "connected", shopName: "Mikolo", region: "JP" });
 
-    const removed = await request(app).delete("/api/tiktok/bindings/grant-th").expect(200);
+    const removed = await request(app).delete("/api/tiktok/bindings/grant-jp").expect(200);
     expect(removed.body.ok).toBe(true);
     // 解绑的是当前店铺所在 grant：选中被清空，状态回落到待选择，剩余绑定保留
     expect(removed.body.tiktok.status).toBe("shop_selection_required");
     expect(removed.body.tiktok.bindings).toHaveLength(1);
     expect(removed.body.tiktok.bindings[0].grantId).toBe("grant-us");
 
-    const replay = await request(app).delete("/api/tiktok/bindings/grant-th").expect(400);
+    const replay = await request(app).delete("/api/tiktok/bindings/grant-jp").expect(400);
     expect(replay.body.error).toContain("没有找到");
   });
 

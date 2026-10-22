@@ -86,7 +86,7 @@ export type ActionPlanStatus = "pending" | "executing" | "verification_pending" 
 
 export interface ActionPlan {
   id: string;
-  tool: "inventory.update" | "price.update" | "product.activate" | "product.deactivate" | "automation.create" | "miaoshou.operation" | "pricing.update";
+  tool: "inventory.update" | "price.update" | "product.activate" | "product.deactivate" | "automation.create" | "miaoshou.operation";
   title: string;
   summary: string;
   store: string;
@@ -128,142 +128,6 @@ export interface WorkflowShopOption {
   miaoshouShopId?: string;
 }
 
-export type PricingFieldSource = "1688" | "miaoshou" | "tiktok" | "csv" | "category_rule" | "default" | "manual";
-
-export interface SkuPricingInput {
-  salePriceThb: number;
-  purchasePriceCny: number;
-  weightKg: number;
-  exchangeRateCnyToThb: number;
-  domesticLogisticsCny: number;
-  cloudWarehouseCny: number;
-  buyerLocalDeliveryThb: number;
-  advertisingThb: number;
-  creatorCommissionRate: number;
-  taxRate: number;
-  categoryCommissionRate: number;
-  crossBorderThbPer10g: number;
-  transactionRate: number;
-  infrastructureFeeThb: number;
-  growthSupportRate: number;
-  merchantDiscountThb: number;
-  platformSubsidyThb: number;
-  platformActivityFeeThb: number;
-}
-
-export interface SkuPricingResult {
-  purchaseCostThb: number;
-  domesticLogisticsThb: number;
-  cloudWarehouseThb: number;
-  crossBorderLogisticsThb: number;
-  localDeliveryThb: number;
-  categoryCommissionThb: number;
-  transactionFeeThb: number;
-  infrastructureFeeThb: number;
-  growthSupportFeeThb: number;
-  taxThb: number;
-  advertisingThb: number;
-  creatorCommissionThb: number;
-  platformActivityFeeThb: number;
-  expectedRevenueThb: number;
-  expectedCostThb: number;
-  expectedProfitThb: number;
-  expectedMargin: number;
-  breakEvenPriceThb: number;
-  profitable: boolean;
-}
-
-export interface SkuActualSettlementInput {
-  period?: string;
-  soldQuantity?: number;
-  tiktokSettlementThb?: number;
-  logisticsDeductionThb?: number;
-  advertisingThb?: number;
-  creatorCommissionThb?: number;
-}
-
-export interface SkuActualSettlementResult {
-  baseCostThb: number;
-  actualCostThb: number;
-  actualProfitThb: number;
-  actualMargin: number;
-  profitable: boolean;
-}
-
-export interface SkuPricingRecord {
-  id: string;
-  workflowId: string;
-  sourceItemId?: string;
-  sourceUrl?: string;
-  commonDetailId?: string;
-  platformDetailId?: string;
-  shopId?: string;
-  tiktokProductId?: string;
-  tiktokSkuId?: string;
-  /** TikTok 商品当前生命周期；INACTIVE 表示最近一次完整同步中不在在售列表。 */
-  tiktokStatus?: "ACTIVATE" | "INACTIVE";
-  productTitle?: string;
-  productImageUrl?: string;
-  availableStock?: number;
-  committedStock?: number;
-  /** 当前生效的 TikTok 促销活动价；不存在活动时为空。 */
-  activityPriceThb?: number;
-  skuKey: string;
-  skuName: string;
-  sellerSku?: string;
-  categoryId?: string;
-  categoryName?: string;
-  categoryPath?: string;
-  currency: "THB";
-  input: SkuPricingInput;
-  result: SkuPricingResult;
-  actualInput?: SkuActualSettlementInput;
-  actualResult?: SkuActualSettlementResult;
-  fieldSources: Record<string, PricingFieldSource>;
-  missingFields: string[];
-  calculatedAt: string;
-}
-
-export interface SupplierSkuPriceMatch {
-  recordId: string;
-  targetSkuId: string;
-  targetSkuName: string;
-  sourceSkuId: string;
-  sourceSkuName: string;
-  purchasePriceCny: number;
-  method: "exact" | "shared_price" | "sequence";
-  confidence: "high" | "medium";
-}
-
-export interface SupplierPricingPreview {
-  sourceUrl: string;
-  sourceItemId: string;
-  sourceTitle: string;
-  targetSkuCount: number;
-  sourceSkuCount: number;
-  matchedCount: number;
-  requiresConfirmation: boolean;
-  matches: SupplierSkuPriceMatch[];
-}
-
-export interface PricingDefaults {
-  exchangeRateCnyToThb: number;
-  domesticLogisticsCny: number;
-  cloudWarehouseCny: number;
-  buyerLocalDeliveryThb: number;
-  advertisingThb: number;
-  creatorCommissionRate: number;
-}
-
-export interface PricingRecordSummary {
-  totalSkus: number;
-  profitableSkus: number;
-  lossSkus: number;
-  minProfitThb: number;
-  maxProfitThb: number;
-  minMargin: number;
-}
-
 export interface ChatImageAttachment {
   id: string;
   name: string;
@@ -291,12 +155,8 @@ export interface SourcingCandidate {
   weightKg: number;
   weightEstimated: boolean;
   domesticShippingCny: number;
-  salePriceThb: number;
-  suggestedSalePriceThb: number;
-  expectedCostThb: number;
-  expectedProfitThb: number;
-  expectedMargin: number;
-  breakEvenPriceThb: number;
+  /** 采购价 + 国内运费。跨境物流、平台佣金与税项不在此列——定价环节单独处理。 */
+  landedCostCny: number;
   tags: string[];
   warnings: string[];
 }
@@ -324,10 +184,6 @@ export interface ProductPublishWorkflowRun {
   publishRequestId?: string;
   publishPrice?: number;
   currency?: string;
-  pricingDefaults?: PricingDefaults;
-  pricingSkus?: SkuPricingRecord[];
-  pricingSummary?: PricingRecordSummary;
-  pricingConfirmed?: boolean;
   packageDimensions?: { length: number; width: number; height: number };
   requestedTitle?: string;
   requestedDescription?: string;
@@ -354,11 +210,6 @@ export interface ProductPublishWorkflowRun {
         kind: "product_edit";
         prompt: string;
         missing: Array<"publishPrice" | "packageDimensions">;
-      }
-    | {
-        kind: "pricing";
-        prompt: string;
-        missing: string[];
       };
   error?: string;
   summary?: string;
@@ -370,7 +221,16 @@ export interface FlashSaleSku {
   id: string;
   sellerSku?: string;
   availableStock: number;
+  /** 商品当前售价，用来判断秒杀价是否真的比原价低 */
+  salePrice?: string;
 }
+
+/**
+ * 活动商品层级。
+ * - PRODUCT：整品一个秒杀价，商品全部 SKU 共用一个活动价（官方接口真机验证过的路径）
+ * - VARIATION：按 SKU 分别定价，适合同一商品不同规格要给不同折扣的情况
+ */
+export type FlashSalePricingLevel = "PRODUCT" | "VARIATION";
 
 export interface FlashSaleWorkflowRun {
   id: string;
@@ -387,6 +247,7 @@ export interface FlashSaleWorkflowRun {
   endAt: string;
   priceAmount: string;
   currency: string;
+  pricingLevel: FlashSalePricingLevel;
   skuSelection: { mode: "all" } | { mode: "include"; skuIds: string[] };
   skuQuantityLimit: number;
   quantityPerUser: number;
@@ -608,13 +469,8 @@ export type MessageArtifact =
       queryImageUrl: string;
       totalCount: number;
       candidates: SourcingCandidate[];
-      assumptions: {
-        requestedSalePriceThb?: number;
-        targetMargin: number;
-        taxRate: number;
-        categoryCommissionRate: number;
-        buyerLocalDeliveryThb: number;
-      };
+      /** 口径说明：告诉用户这些数字包含哪些成本、不包含哪些，避免被当成到手利润。 */
+      costNote: string;
       source: string;
     }
   | {

@@ -261,7 +261,9 @@ export interface TikTokOperationalData {
 }
 
 const regionMetadata: Record<string, { label: string; currency: string; timezone: string }> = {
-  TH: { label: "泰国", currency: "THB", timezone: "Asia/Bangkok" },
+  // 日本站是当前唯一的经营站点。时区必须准确：这里的 timezone 会用于
+  // 「最近 N 天」的日界锚定，回落 UTC 会让每天的数据窗口偏移 9 小时。
+  JP: { label: "日本", currency: "JPY", timezone: "Asia/Tokyo" },
   US: { label: "美国", currency: "USD", timezone: "America/Los_Angeles" },
   GB: { label: "英国", currency: "GBP", timezone: "Europe/London" },
   SG: { label: "新加坡", currency: "SGD", timezone: "Asia/Singapore" },
@@ -273,6 +275,37 @@ const regionMetadata: Record<string, { label: string; currency: string; timezone
 
 const cache = new Map<string, { expiresAt: number; promise: Promise<TikTokOperationalData> }>();
 const MAX_PAGINATION_PAGES = 1_000;
+
+// 商品详情（主图/类目/SKU 规格名）短期不会变，但接口是逐个商品查的：
+// 一家 104 个商品的店，一次汇总就要打 104 次，是整体耗时里最大的一块。
+// 缓存后同一批商品在 TTL 内不再重复请求。
+const PRODUCT_METADATA_TTL_MS = Math.max(0, Number(process.env.TIKTOK_PRODUCT_META_TTL_MS ?? "") || 10 * 60 * 1000);
+const MAX_PRODUCT_METADATA_ENTRIES = 10_000;
+// 商品详情这类逐项查询的并发上限。TikTok 对单店铺 QPS 有限制，默认 8 是稳妥值。
+const API_CONCURRENCY = Math.max(1, Math.min(20, Number(process.env.TIKTOK_API_CONCURRENCY ?? "") || 8));
+const productMetadataCache = new Map<string, { value: ProductMetadata; expiresAt: number }>();
+
+function readProductMetadataCache(productId: string): ProductMetadata | undefined {
+  const hit = productMetadataCache.get(productId);
+  if (!hit) return undefined;
+  if (hit.expiresAt <= Date.now()) {
+    productMetadataCache.delete(productId);
+    return undefined;
+  }
+  return hit.value;
+}
+
+function writeProductMetadataCache(productId: string, value: ProductMetadata): void {
+  if (PRODUCT_METADATA_TTL_MS <= 0) return;
+  if (productMetadataCache.size >= MAX_PRODUCT_METADATA_ENTRIES) {
+    const now = Date.now();
+    for (const [key, entry] of productMetadataCache) {
+      if (entry.expiresAt <= now) productMetadataCache.delete(key);
+    }
+    if (productMetadataCache.size >= MAX_PRODUCT_METADATA_ENTRIES) productMetadataCache.clear();
+  }
+  productMetadataCache.set(productId, { value, expiresAt: Date.now() + PRODUCT_METADATA_TTL_MS });
+}
 
 interface PaginatedResult<T> {
   items: T[];
@@ -312,6 +345,7 @@ async function searchProducts(client: TikTokShopClient): Promise<{ products: Tik
 
   while (pages < MAX_PAGINATION_PAGES) {
     const response = await client.request<unknown>("/product/202502/products/search", {
+      retry: 2,
       method: "POST",
       query: { page_size: "100", ...(pageToken ? { page_token: pageToken } : {}) },
       body: { status: "ACTIVATE" },
@@ -347,6 +381,7 @@ async function searchOrders(client: TikTokShopClient, start: number, end: number
 
   while (pages < MAX_PAGINATION_PAGES) {
     const response = await client.request<unknown>("/order/202309/orders/search", {
+      retry: 2,
       method: "POST",
       query: { page_size: "100", ...(pageToken ? { page_token: pageToken } : {}) },
       body: { create_time_ge: start, create_time_lt: end },
@@ -382,6 +417,7 @@ async function searchReturns(client: TikTokShopClient, start: number, end: numbe
 
   while (pages < MAX_PAGINATION_PAGES) {
     const response = await client.request<unknown>("/return_refund/202309/returns/search", {
+      retry: 2,
       method: "POST",
       query: { page_size: "50", ...(pageToken ? { page_token: pageToken } : {}) },
       body: { create_time_ge: start, create_time_lt: end },
@@ -415,6 +451,7 @@ async function searchInventory(client: TikTokShopClient, productIds: string[]): 
     if (!batch.length) continue;
     const response = await client.request<unknown>("/product/202309/inventory/search", {
       method: "POST",
+      retry: 2,
       body: { product_ids: batch },
     });
     const payload = parseResponse(inventorySearchSchema, response, "库存列表");
@@ -433,6 +470,7 @@ async function searchInventory(client: TikTokShopClient, productIds: string[]): 
 async function getShopPerformance(client: TikTokShopClient, startDate: string, endDate: string): Promise<{ intervals: AnalyticsInterval[]; latestAvailableDate?: string }> {
   const response = await client.request<unknown>("/analytics/202509/shop/performance", {
     query: { start_date_ge: startDate, end_date_lt: endDate, granularity: "1D", currency: "LOCAL" },
+    retry: 2,
   });
   const payload = parseResponse(analyticsResponseSchema, response, "店铺经营指标");
   return {
@@ -498,9 +536,18 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item
 }
 
 async function loadProductMetadata(client: TikTokShopClient, products: TikTokProduct[]): Promise<Map<string, ProductMetadata>> {
-  const entries = await mapWithConcurrency(products, 4, async (product): Promise<[string, ProductMetadata]> => {
+  const result = new Map<string, ProductMetadata>();
+  const missing: TikTokProduct[] = [];
+  for (const product of products) {
+    const cached = readProductMetadataCache(product.id);
+    if (cached) result.set(product.id, cached);
+    else missing.push(product);
+  }
+  if (!missing.length) return result;
+
+  const entries = await mapWithConcurrency(missing, API_CONCURRENCY, async (product): Promise<[string, ProductMetadata]> => {
     try {
-      const response = await client.request<unknown>(`/product/202309/products/${product.id}`);
+      const response = await client.request<unknown>(`/product/202309/products/${product.id}`, { retry: 2 });
       const detail = parseResponse(productDetailSchema, response, "商品详情").data;
       const image = detail?.main_images?.[0]?.thumb_urls?.[0] ?? detail?.main_images?.[0]?.urls?.[0] ?? "";
       const chains = detail?.category_chains ?? [];
@@ -517,10 +564,17 @@ async function loadProductMetadata(client: TikTokShopClient, products: TikTokPro
         skuNames,
       }];
     } catch {
+      // 单个商品失败不写缓存：否则一次网络抖动会把空图钉住整个 TTL
       return [product.id, { image: "" }];
     }
   });
-  return new Map(entries);
+  for (const [productId, value] of entries) {
+    if (value.image || value.categoryId || value.categoryName || value.skuNames?.size) {
+      writeProductMetadataCache(productId, value);
+    }
+    result.set(productId, value);
+  }
+  return result;
 }
 
 function currentPromotion(activity: z.output<typeof promotionActivitySchema>, now: number): boolean {
@@ -535,15 +589,16 @@ async function loadActiveActivityPrices(client: TikTokShopClient): Promise<Map<s
   try {
     const search = await client.request<unknown>("/promotion/202309/activities/search", {
       method: "POST",
+      retry: 2,
       body: { page_size: 50 },
     });
     const now = Math.floor(Date.now() / 1000);
     const activities = (parseResponse(promotionSearchSchema, search, "促销活动列表").data?.activities ?? [])
       .filter((activity) => currentPromotion(activity, now));
-    const details = await mapWithConcurrency(activities, 4, async (activity) => {
+    const details = await mapWithConcurrency(activities, API_CONCURRENCY, async (activity) => {
       const activityId = activity.id ?? activity.activity_id;
       if (!activityId) return undefined;
-      const response = await client.request<unknown>(`/promotion/202309/activities/${encodeURIComponent(activityId)}`);
+      const response = await client.request<unknown>(`/promotion/202309/activities/${encodeURIComponent(activityId)}`, { retry: 2 });
       return parseResponse(promotionDetailSchema, response, "促销活动详情").data;
     });
     const prices = new Map<string, number>();
@@ -753,7 +808,7 @@ async function fetchOperationalData(days: number): Promise<TikTokOperationalData
   if (!client) throw new Error("TikTok Shop 尚未连接。");
   const authorization = await readStoredAuthorization();
   const shop = selectedShop(authorization);
-  const metadata = regionMetadata[shop.region] ?? { label: shop.region, currency: "USD", timezone: "UTC" };
+  const metadata = regionMetadata[shop.region] ?? { label: shop.region, currency: "JPY", timezone: "Asia/Tokyo" };
   const now = Math.floor(Date.now() / 1000);
   const currentStart = now - days * 86400;
   const previousStart = now - days * 2 * 86400;
@@ -878,6 +933,13 @@ async function fetchOperationalData(days: number): Promise<TikTokOperationalData
   };
 }
 
+// 整份经营快照的复用时长。
+// 一次多步推理（ReAct）里模型会反复调用销售/订单/退款/GMV 这几个工具，
+// 每个工具都落到同一份快照上。原来只有 30 秒，模型每走一步几乎都要重新拉一遍
+// 全量数据（约 12 秒），一次对话因此能拖到 100 秒以上。
+// 平台本身的数据就有 T+1 延迟，几分钟内复用不会让结论失真。
+const SNAPSHOT_TTL_MS = Math.max(30_000, Number(process.env.TIKTOK_SNAPSHOT_TTL_MS ?? "") || 5 * 60 * 1000);
+
 export async function getTikTokOperationalData(days = 7): Promise<TikTokOperationalData> {
   const authorization = await readStoredAuthorization();
   const shop = selectedShop(authorization);
@@ -889,7 +951,7 @@ export async function getTikTokOperationalData(days = 7): Promise<TikTokOperatio
     cache.delete(key);
     throw error;
   });
-  cache.set(key, { expiresAt: Date.now() + 30_000, promise });
+  cache.set(key, { expiresAt: Date.now() + SNAPSHOT_TTL_MS, promise });
   return promise;
 }
 
@@ -905,4 +967,5 @@ export async function getCurrentDashboard(): Promise<DashboardSnapshot> {
 
 export function clearTikTokDataCache(): void {
   cache.clear();
+  productMetadataCache.clear();
 }

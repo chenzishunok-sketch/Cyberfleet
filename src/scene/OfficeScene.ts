@@ -38,7 +38,7 @@ const AUTO_WORKFLOW_MAX_ACTIVE = 2
 const AUTO_WORKFLOW_INTERVAL = 1.2
 
 const AUTO_WORKFLOW_STEPS: AutoWorkflowStep[] = [
-  { visitor: 1, host: 4, message: '先筛一批适合泰国店铺的候选商品。' },
+  { visitor: 1, host: 4, message: '先筛一批适合日本店铺的候选商品。' },
   { visitor: 4, host: 5, message: '货源已经确认，可以进入采集流程。' },
   { visitor: 5, host: 2, message: '商品资料已采集，请补全 SKU 台账。' },
   { visitor: 2, host: 3, message: '成本已补全，麻烦核算价格和利润。' },

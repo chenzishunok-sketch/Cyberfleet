@@ -212,7 +212,9 @@ async function tmapiRequest<S extends z.ZodTypeAny>(path: string, init: RequestI
   if (!apiToken) throw new TmapiError("1688 货源数据 API 尚未配置。");
 
   const url = new URL(path, `${baseUrl.replace(/\/$/, "")}/`);
-  query.set("apiToken", apiToken);
+  // TMAPI 鉴权走 `apikey` 请求头，不是 query 参数 `apiToken`。
+  // 实测把 token 放 query 会返回 401 {"code":4013,"message":"unauthorized"}，
+  // 放 header 才返回 200。参数名用 snake_case（item_id），与官方一致。
   url.search = query.toString();
 
   let response: Response;
@@ -221,6 +223,10 @@ async function tmapiRequest<S extends z.ZodTypeAny>(path: string, init: RequestI
     // 因此只对该 HTTP 请求使用直连；其他外部服务仍沿用全局代理配置。
     response = await fetch(url, {
       ...init,
+      headers: {
+        ...(init.headers ?? {}),
+        apikey: apiToken,
+      },
       signal: AbortSignal.timeout(65_000),
       ...(url.protocol === "http:" ? { dispatcher: directHttpDispatcher } : {}),
     } as RequestInit & { dispatcher?: Agent });

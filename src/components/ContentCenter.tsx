@@ -95,7 +95,7 @@ export function ContentCenter({ section }: ContentCenterProps) {
   const [title, setTitle] = useState("");
   const [project, setProject] = useState("");
   const [sku, setSku] = useState("");
-  const [language, setLanguage] = useState("泰语");
+  const [language, setLanguage] = useState("日语");
   const [textKind, setTextKind] = useState<"title" | "listing" | "script">("listing");
   const [ratio, setRatio] = useState("9:16");
   const [imageSize, setImageSize] = useState("2K");
@@ -213,7 +213,7 @@ export function ContentCenter({ section }: ContentCenterProps) {
           <section className="content-studio">
             <div className="content-compose">
               <div className="content-meta-row">
-                <label><span>项目</span><input value={project} onChange={(event) => setProject(event.target.value)} placeholder="例如：泰国新品首发" /></label>
+                <label><span>项目</span><input value={project} onChange={(event) => setProject(event.target.value)} placeholder="例如：日本新品首发" /></label>
                 <label><span>商品 SKU</span><input value={sku} onChange={(event) => setSku(event.target.value)} placeholder="可选" /></label>
                 <label><span>素材名称</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="自动使用创作要求" /></label>
               </div>
@@ -241,7 +241,7 @@ export function ContentCenter({ section }: ContentCenterProps) {
               <div className="content-controls">
                 {mode === "text" ? <>
                   <label><span>类型</span><select value={textKind} onChange={(event) => setTextKind(event.target.value as typeof textKind)}><option value="title">商品标题</option><option value="listing">卖点 Listing</option><option value="script">短视频脚本</option></select></label>
-                  <label><span>语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option>泰语</option><option>中文</option><option>英语</option></select></label>
+                  <label><span>语言</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option>日语</option><option>中文</option><option>英语</option></select></label>
                 </> : <>
                   <label><span>比例</span><select value={ratio} onChange={(event) => setRatio(event.target.value)}>{(mode === "image" ? ["1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "21:9"] : ["9:16", "16:9", "1:1", "4:3", "3:4"]).map((item) => <option key={item}>{item}</option>)}</select></label>
                   {mode === "image" ? <>

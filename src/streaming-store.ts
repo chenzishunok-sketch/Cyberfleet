@@ -7,10 +7,16 @@ import type { RunStep } from "../shared/contracts";
 export interface ChatStreamingState {
   conversationId: string;
   steps: RunStep[];
+  /** 正在执行的那几步。一次 ReAct 可能并行查多个接口，所以是列表而不是单条 */
+  activity: RunStep[];
   content: string;
 }
 
-const IDLE: ChatStreamingState = { conversationId: "", steps: [], content: "" };
+const IDLE: ChatStreamingState = { conversationId: "", steps: [], activity: [], content: "" };
+
+/** 后端用这两个固定 id 推「进行中」的临时步骤，不进入历史步骤列表 */
+export const ACTIVE_STEP_IDS = new Set(["live-active", "react-active"]);
+const MAX_ACTIVITY = 4;
 
 let active: ChatStreamingState | undefined;
 let activeController: AbortController | undefined;
@@ -30,20 +36,41 @@ export const chatStreaming = {
   begin(conversationId: string): AbortController {
     activeController?.abort();
     activeController = new AbortController();
-    active = { conversationId, steps: [], content: "" };
+    active = { conversationId, steps: [], activity: [], content: "" };
     emit();
     return activeController;
   },
 
   addStep(step: RunStep): void {
     if (!active) return;
-    active = { ...active, steps: [...active.steps, step] };
+    // 临时步骤只更新「当前在做什么」，不写进历史
+    if (ACTIVE_STEP_IDS.has(step.id)) {
+      if (active.activity.some((item) => item.label === step.label)) return;
+      active = { ...active, activity: [...active.activity, step].slice(-MAX_ACTIVITY) };
+      emit();
+      return;
+    }
+    // 正式步骤到达，说明同名的那一步已经结束
+    let consumed = false;
+    const activity = active.activity.filter((item) => {
+      if (!consumed && item.label === step.label) {
+        consumed = true;
+        return false;
+      }
+      return true;
+    });
+    const exists = active.steps.some((item) => item.id === step.id);
+    active = {
+      ...active,
+      steps: exists ? active.steps.map((item) => (item.id === step.id ? step : item)) : [...active.steps, step],
+      activity,
+    };
     emit();
   },
 
   appendContent(delta: string): void {
     if (!active) return;
-    active = { ...active, content: active.content + delta };
+    active = { ...active, content: active.content + delta, activity: [] };
     emit();
   },
 

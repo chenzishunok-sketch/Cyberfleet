@@ -9,12 +9,10 @@
 - 读取 TikTok Shop 店铺、订单、商品、库存、售后、财务、促销和经营分析数据
 - 读取 TMAPI 1688 商品详情并支持以图搜索同款货源
 - 通过妙手完成 1688 采集、TikTok 认领、商品编辑、发布和结果回查
-- 按 SKU 保存 1688、妙手、TikTok 编号映射、默认/手工成本、预估利润、实际结算和计算历史
-- 商品管理支持按商品批量设置共用成本，也可逐 SKU 覆盖；可记录 TikTok 结算、销量和物流扣费，并导出 CSV/Excel
-- 商品管理可只读同步 TikTok 全店商品和 SKU；已有手工成本不会被覆盖，新增 SKU 标记为待补成本
-- 商品管理 Agent 支持用自然语言查询缺失成本/亏损 SKU、同步店铺商品、导出利润表；修改本地成本前会生成审批卡，确认后才写入
-- 数字员工中心统一提供运营总监、商品管理、定价、选品、采集、上架和达人 BD Agent；专属会话统一归入“最近”，运营总监复用持久化任务中心协调跨 Agent 流程
-- 全店同步会读取 TikTok 叶子类目，并按泰国规则自动匹配税率和平台佣金；手工修改始终优先
+- 选品结果按候选商品给出采购价、起订量、销量、重量和到岸成本（采购价 + 国内运费），不做跨站点利润预估
+- 上架流程保存 1688、妙手、TikTok 的编号映射，售价在「保存售价和商品资料」步骤一次填清
+- 数字员工中心统一提供运营总监、商品管理、选品、采集、上架和达人 BD Agent；专属会话统一归入“最近”，运营总监复用持久化任务中心协调跨 Agent 流程
+- 项目当前只经营日本市场：站点、语言、币种、时区均以日本站为准（`server/tiktok-sites.ts` 是唯一站点来源）
 - 支持库存、改价、上下架、秒杀和达人建联审批任务
 - 支持绑定多个 TikTok 卖家账号与多国店铺：设置页「绑定新店铺」向导分步引导配置 App Key/Secret 并完成授权；绑定列表可切换当前店铺、重新授权（换绑）和解绑。同账号下的多国店铺随一次授权一起进入系统；旧的单店授权文件首次启动时自动迁移（原文件保留为 `.v1.bak` 备份）
 - 查询自动执行；所有真实写入都必须通过审核卡确认
@@ -33,7 +31,7 @@ npm run dev
 
 打开 [http://localhost:5182](http://localhost:5182)。API 服务运行在 `http://localhost:8795`；直接打开 `8795` 也会自动跳转到网页。
 
-> 端口可在 `.env` 中调整：`PORT`（API，默认 8795）、`KOL_BRIDGE_PORT`（达人建联 WebSocket，默认 8796）、`npm run dev` 中 Vite 的前端端口固定为 5182。改完后用 `npm run kill` 清理旧进程。
+> 端口可在 `.env` 中调整：`PORT`（API，默认 8795）、`KOL_BRIDGE_PORT`（达人建联 WebSocket，默认 8788，须与浏览器扩展 `bridge-page-relay.js` 里的 `BRIDGE_URL` 一致）、`npm run dev` 中 Vite 的前端端口固定为 5182。改完后用 `npm run kill` 清理旧进程。
 
 构建与测试：
 
@@ -189,7 +187,7 @@ src/                 React 运营工作台
 server/app.ts        HTTP API 与输入校验
 server/orchestrator.ts  工具路由、审批计划和执行回执
 server/workflow-store.ts SQLite 业务任务和执行历史
-server/pricing-store.ts SKU 成本利润台账
+server/tiktok-sites.ts 站点、语言、币种映射的唯一定义
 server/database-backup.ts 每日本地数据库备份
 server/llm.ts        OpenAI-compatible 工具选择
 server/tiktok-client.ts TikTok Shop transport 与签名

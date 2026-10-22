@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { installAuthGate, isAuthEnabled } from "./auth-gate.ts";
-import type { ChatRequest, MessageArtifact, SkuPricingRecord } from "../shared/contracts.ts";
+import type { ChatRequest, MessageArtifact } from "../shared/contracts.ts";
 import { AGENT_CONTEXTS, type AgentContext } from "../shared/digital-employees.ts";
 import { approveAction, handleChat, rejectAction } from "./orchestrator.ts";
 import { agentRegistry } from "./agent-registry.ts";
@@ -41,12 +41,6 @@ import { kolBridge } from "./kol-bridge.ts";
 import { startKolOutreachWorkflow } from "./kol-outreach-workflow.ts";
 import { getTmapiItemDetailById, hasTmapiConfiguration, TmapiError } from "./tmapi-client.ts";
 import { workflowCoordinator } from "./workflow-coordinator.ts";
-import { pricingStore } from "./pricing-store.ts";
-import { createPricingWorkbook, pricingCsv } from "./pricing-export.ts";
-import { importPricingCsv } from "./pricing-import.ts";
-import { calculateActualSettlement, calculateSkuPricingWithActivity } from "./pricing-engine.ts";
-import { applyProductPricing, syncPricingFromTikTok } from "./pricing-sync.ts";
-import { applySupplierPricing, previewSupplierPricing } from "./pricing-1688.ts";
 import { contentAssetPath, contentOverview, createImageContent, createTextContent, createVideoContent } from "./content-service.ts";
 import {
   getSkillsCatalog,
@@ -117,78 +111,6 @@ const createWorkflowSchema = z.object({
   description: z.string().trim().min(1).max(10000).optional(),
 });
 const productInputSchema = createWorkflowSchema.pick({ publishPrice: true, packageDimensions: true, title: true, description: true }).extend({ publishPrice: z.number().positive() });
-const pricingValueSchema = z.object({
-  salePriceThb: z.number().positive().optional(),
-  purchasePriceCny: z.number().nonnegative().optional(),
-  weightKg: z.number().positive().optional(),
-  exchangeRateCnyToThb: z.number().positive().optional(),
-  domesticLogisticsCny: z.number().nonnegative().optional(),
-  cloudWarehouseCny: z.number().nonnegative().optional(),
-  buyerLocalDeliveryThb: z.number().nonnegative().optional(),
-  advertisingThb: z.number().nonnegative().optional(),
-  creatorCommissionRate: z.number().nonnegative().max(1).optional(),
-  taxRate: z.number().nonnegative().max(1).optional(),
-  categoryCommissionRate: z.number().nonnegative().max(1).optional(),
-  merchantDiscountThb: z.number().nonnegative().optional(),
-  platformSubsidyThb: z.number().nonnegative().optional(),
-  platformActivityFeeThb: z.number().nonnegative().optional(),
-}).partial();
-const pricingInputSchema = z.object({
-  defaults: z.object({
-    exchangeRateCnyToThb: z.number().positive().optional(),
-    domesticLogisticsCny: z.number().nonnegative().optional(),
-    cloudWarehouseCny: z.number().nonnegative().optional(),
-    buyerLocalDeliveryThb: z.number().nonnegative().optional(),
-    advertisingThb: z.number().nonnegative().optional(),
-    creatorCommissionRate: z.number().nonnegative().max(1).optional(),
-  }).partial().optional(),
-  skus: z.array(z.object({ skuKey: z.string().min(1), values: pricingValueSchema })).max(500).optional(),
-  removedSkuKeys: z.array(z.string().min(1)).max(499).optional(),
-});
-const pricingRecordUpdateSchema = z.object({
-  input: pricingValueSchema.optional(),
-  actual: z.object({
-    period: z.string().trim().max(20).optional(),
-    soldQuantity: z.number().int().positive().optional(),
-    tiktokSettlementThb: z.number().nonnegative().optional(),
-    logisticsDeductionThb: z.number().nonnegative().optional(),
-    advertisingThb: z.number().nonnegative().optional(),
-    creatorCommissionThb: z.number().nonnegative().optional(),
-  }).partial().optional(),
-});
-const productPricingSchema = z.object({
-  values: z.object({
-    purchasePriceCny: z.number().positive().optional(),
-    weightKg: z.number().positive().optional(),
-    exchangeRateCnyToThb: z.number().positive().optional(),
-    domesticLogisticsCny: z.number().nonnegative().optional(),
-    cloudWarehouseCny: z.number().nonnegative().optional(),
-    buyerLocalDeliveryThb: z.number().nonnegative().optional(),
-    advertisingThb: z.number().nonnegative().optional(),
-    creatorCommissionRate: z.number().nonnegative().max(1).optional(),
-    taxRate: z.number().nonnegative().max(1).optional(),
-    categoryCommissionRate: z.number().nonnegative().max(1).optional(),
-  }).partial().refine((values) => Object.keys(values).length > 0),
-});
-const supplierPricingSchema = z.object({ sourceUrl: z.string().trim().url().max(2000) });
-
-type PricingScope = "all" | "store" | "inactive" | "draft";
-
-function pricingScope(value: unknown): PricingScope {
-  return value === "store" || value === "inactive" || value === "draft" ? value : "all";
-}
-
-function isActiveStoreRecord(record: SkuPricingRecord): boolean {
-  return Boolean(record.tiktokProductId && record.tiktokSkuId)
-    && (record.tiktokStatus === "ACTIVATE" || !record.tiktokStatus);
-}
-
-function pricingRecordsInScope(records: SkuPricingRecord[], scope: PricingScope): SkuPricingRecord[] {
-  return records.filter((record) => scope === "store" ? isActiveStoreRecord(record)
-    : scope === "inactive" ? Boolean(record.tiktokProductId && record.tiktokSkuId && record.tiktokStatus === "INACTIVE")
-    : scope === "draft" ? !(record.tiktokProductId && record.tiktokSkuId)
-      : true);
-}
 const flashSaleSchema = z.object({
   productId: z.string().trim().regex(/^\d{10,30}$/),
   activityTitle: z.string().trim().min(1).max(100),
@@ -196,6 +118,7 @@ const flashSaleSchema = z.object({
   endAt: z.string().datetime({ offset: true }),
   priceAmount: z.string().trim().regex(/^\d+(?:\.\d{1,2})?$/),
   currency: z.string().trim().min(3).max(3).optional(),
+  pricingLevel: z.enum(["PRODUCT", "VARIATION"]).optional(),
   skuIds: z.array(z.string().regex(/^\d+$/)).max(100).optional(),
   skuQuantityLimit: z.number().int(),
   quantityPerUser: z.number().int(),
@@ -1029,154 +952,6 @@ export function createApp() {
 
   // ─── 本地发布任务 ─────────────────────────────
 
-  app.get("/api/pricing", (request, response) => {
-    const workflowId = typeof request.query.workflowId === "string" ? request.query.workflowId : undefined;
-    const scope = pricingScope(request.query.scope);
-    const records = workflowId ? pricingStore.listByWorkflow(workflowId) : pricingStore.list();
-    response.json({ records: pricingRecordsInScope(records, scope) });
-  });
-
-  app.get("/api/pricing/history/:workflowId", (request, response) => {
-    response.json({ records: pricingStore.history(request.params.workflowId) });
-  });
-
-  app.post("/api/pricing/sync", async (_request, response) => {
-    try {
-      response.json(await syncPricingFromTikTok());
-    } catch (error) {
-      response.status(503).json({ error: error instanceof Error ? error.message : "无法同步 TikTok 商品。" });
-    }
-  });
-
-  app.patch("/api/pricing/product/:productId", (request, response) => {
-    const parsed = productPricingSchema.safeParse(request.body);
-    if (!parsed.success) {
-      response.status(400).json({ error: "请至少填写一项有效成本；采购价、重量和汇率必须大于 0。" });
-      return;
-    }
-    try {
-      response.json(applyProductPricing(pricingStore, request.params.productId, parsed.data.values));
-    } catch (error) {
-      response.status(404).json({ error: error instanceof Error ? error.message : "无法批量保存商品成本。" });
-    }
-  });
-
-  app.post("/api/pricing/product/:productId/1688/preview", async (request, response) => {
-    const parsed = supplierPricingSchema.safeParse(request.body);
-    if (!parsed.success) {
-      response.status(400).json({ error: "请填写有效的 1688 商品链接。" });
-      return;
-    }
-    try {
-      const records = pricingStore.list().filter((record) => record.tiktokProductId === request.params.productId);
-      if (!records.length) {
-        response.status(404).json({ error: "找不到这个 TikTok 商品的 SKU 记录。" });
-        return;
-      }
-      response.json({ preview: await previewSupplierPricing(records, parsed.data.sourceUrl) });
-    } catch (error) {
-      response.status(502).json({ error: error instanceof Error ? error.message : "1688 采购价识别失败。" });
-    }
-  });
-
-  app.post("/api/pricing/product/:productId/1688/apply", async (request, response) => {
-    const parsed = supplierPricingSchema.safeParse(request.body);
-    if (!parsed.success) {
-      response.status(400).json({ error: "请填写有效的 1688 商品链接。" });
-      return;
-    }
-    try {
-      const records = pricingStore.list().filter((record) => record.tiktokProductId === request.params.productId);
-      if (!records.length) {
-        response.status(404).json({ error: "找不到这个 TikTok 商品的 SKU 记录。" });
-        return;
-      }
-      const preview = await previewSupplierPricing(records, parsed.data.sourceUrl);
-      const result = applySupplierPricing(pricingStore, preview, records);
-      response.json({ ...result, preview });
-    } catch (error) {
-      response.status(502).json({ error: error instanceof Error ? error.message : "1688 采购价写入失败。" });
-    }
-  });
-
-  app.patch("/api/pricing/:id", (request, response) => {
-    const parsed = pricingRecordUpdateSchema.safeParse(request.body);
-    if (!parsed.success) {
-      response.status(400).json({ error: "请检查成本、佣金和实际结算数据，数值不能小于 0。" });
-      return;
-    }
-    const updated = pricingStore.update(request.params.id, (record) => {
-      const input = { ...record.input, ...(parsed.data.input ?? {}) };
-      const actualInput = parsed.data.actual ? { ...record.actualInput, ...parsed.data.actual } : record.actualInput;
-      return {
-        ...record,
-        input,
-        result: calculateSkuPricingWithActivity(input, record.activityPriceThb),
-        actualInput,
-        actualResult: actualInput ? calculateActualSettlement(input, actualInput) : undefined,
-        fieldSources: {
-          ...record.fieldSources,
-          ...Object.fromEntries(Object.keys(parsed.data.input ?? {}).map((field) => [field, "manual" as const])),
-        },
-        missingFields: record.missingFields.filter((field) => !(field in (parsed.data.input ?? {}))),
-        calculatedAt: new Date().toISOString(),
-      };
-    });
-    if (!updated) {
-      response.status(404).json({ error: "找不到这个 SKU 记录。" });
-      return;
-    }
-    response.json({ record: updated });
-  });
-
-  app.get("/api/pricing/export.xlsx", (request, response) => {
-    try {
-      const workflowId = typeof request.query.workflowId === "string" ? request.query.workflowId : undefined;
-      const scope = pricingScope(request.query.scope);
-      const records = pricingRecordsInScope(workflowId ? pricingStore.listByWorkflow(workflowId) : pricingStore.list(), scope);
-      const history = pricingRecordsInScope(workflowId ? pricingStore.history(workflowId) : pricingStore.historyAll(), scope);
-      if (!records.length) {
-        response.status(404).json({ error: "还没有可导出的 SKU 利润记录。" });
-        return;
-      }
-      const path = createPricingWorkbook(records, history, workflowId ?? "all");
-      response.download(path, "TikTok-Shop-SKU成本利润.xlsx");
-    } catch (error) {
-      response.status(500).json({ error: error instanceof Error ? error.message : "Excel 导出失败。" });
-    }
-  });
-
-  app.get("/api/pricing/export.csv", (request, response) => {
-    const workflowId = typeof request.query.workflowId === "string" ? request.query.workflowId : undefined;
-    const scope = pricingScope(request.query.scope);
-    const records = pricingRecordsInScope(workflowId ? pricingStore.listByWorkflow(workflowId) : pricingStore.list(), scope);
-    if (!records.length) {
-      response.status(404).json({ error: "还没有可导出的 SKU 利润记录。" });
-      return;
-    }
-    response.type("text/csv; charset=utf-8").attachment("TikTok-Shop-SKU成本利润.csv").send(pricingCsv(records));
-  });
-
-  app.post("/api/pricing/import", (request, response) => {
-    const csv = typeof request.body === "string" ? request.body : String(request.body ?? "");
-    if (!csv.trim()) {
-      response.status(400).json({ error: "CSV 内容为空。" });
-      return;
-    }
-    try {
-      const result = importPricingCsv(csv);
-      if (result.records.length) pricingStore.upsert(result.records);
-      response.json({
-        imported: result.records.length,
-        errors: result.errors,
-        workflowId: result.workflowId,
-        records: result.records,
-      });
-    } catch (error) {
-      response.status(400).json({ error: error instanceof Error ? error.message : "CSV 导入失败。" });
-    }
-  });
-
   app.get("/api/workflows", async (_request, response) => {
     response.json({ runs: await workflowCoordinator.list() });
   });
@@ -1261,19 +1036,6 @@ export function createApp() {
       response.json({ run: await productPublishWorkflowEngine.updateProductInput(request.params.id, parsed.data) });
     } catch (error) {
       response.status(409).json({ error: error instanceof Error ? error.message : "无法保存商品输入。" });
-    }
-  });
-
-  app.post("/api/workflows/:id/pricing", async (request, response) => {
-    const parsed = pricingInputSchema.safeParse(request.body);
-    if (!parsed.success) {
-      response.status(400).json({ error: "请检查 SKU 售价、成本、重量和费率，数值不能小于 0。" });
-      return;
-    }
-    try {
-      response.json({ run: await productPublishWorkflowEngine.updatePricingInput(request.params.id, parsed.data) });
-    } catch (error) {
-      response.status(409).json({ error: error instanceof Error ? error.message : "无法保存 SKU 成本和利润。" });
     }
   });
 

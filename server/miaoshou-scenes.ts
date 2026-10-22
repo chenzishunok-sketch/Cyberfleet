@@ -1,4 +1,5 @@
 import type { MessageArtifact } from "../shared/contracts.ts";
+import { languageForSite } from "./tiktok-sites.ts";
 import {
   hasMiaoshouConfiguration,
   miaoshouFetchItem,
@@ -10,6 +11,7 @@ import {
   miaoshouTranslateItem,
   miaoshouAiGenerateProductInfo,
   miaoshouGetShopList,
+  miaoshouResolveSite,
   miaoshouPublishToTikTok,
   miaoshouGetPublishRecords,
   miaoshouGetPriceTemplates,
@@ -234,12 +236,49 @@ function extractShopIdsFromHistory(history?: Array<{ role: string; content: stri
   return [];
 }
 
-const SITE_TO_LANG: Record<string, string> = {
-  TH: "th", VN: "vi", MY: "ms", PH: "en", SG: "en", ID: "id", US: "en", UK: "en",
-};
-
 function isPermissionError(msg: string): boolean {
   return msg.includes("无权限") || msg.includes("应用无权限");
+}
+
+/** 类目表最多展示的叶子节点数：TikTok 站点类目动辄上千条，全量塞进表格会拖垮界面 */
+const MAX_CATEGORY_ROWS = 200;
+
+interface FlatCategory {
+  id: unknown;
+  name: string;
+  path: string;
+  isLeaf: boolean;
+}
+
+/**
+ * 递归展平 `cateTree`。
+ * 妙手返回的是嵌套 children（对象 map），且 `isLastLevel` 是字符串 "1"/"0"——
+ * 直接当布尔用会让所有类目都变成叶子（"0" 在 JS 里是真值）。
+ */
+function flattenCategoryTree(tree: Record<string, unknown>): FlatCategory[] {
+  const out: FlatCategory[] = [];
+  const walk = (node: unknown, parentPath: string) => {
+    if (!node || typeof node !== "object") return;
+    const record = node as Record<string, unknown>;
+    const name = String(record.nameChinese ?? record.name ?? "").trim();
+    if (!name) return;
+    const path = parentPath ? `${parentPath} > ${name}` : name;
+    out.push({
+      id: record.cid,
+      name,
+      path,
+      isLeaf: String(record.isLastLevel ?? "0").trim() === "1",
+    });
+    const children = record.children;
+    const list = Array.isArray(children)
+      ? children
+      : children && typeof children === "object"
+        ? Object.values(children as Record<string, unknown>)
+        : [];
+    for (const child of list) walk(child, path);
+  };
+  for (const root of Object.values(tree)) walk(root, "");
+  return out;
 }
 
 async function supplementInfoFlow(
@@ -251,7 +290,7 @@ async function supplementInfoFlow(
   let detailIds = extractTiktokDetailIdsFromHistory(history);
   let shopIds = extractShopIdsFromHistory(history);
 
-  let site = "TH";
+  let site = "";
   try {
     const shopRes = await miaoshouGetShopList("tiktok", "all");
     const list = (shopRes.data as { shopList?: Array<Record<string, unknown>> }).shopList ?? [];
@@ -260,11 +299,12 @@ async function supplementInfoFlow(
       if (!Number.isNaN(id) && id > 0) shopIds = [id];
     }
     const matched = shopIds.length ? list.find((s) => Number(s.shopId) === shopIds[0]) : list[0];
-    if (matched) site = String(matched.site ?? "TH");
+    if (matched) site = String(matched.site ?? "");
   } catch {
     // 店铺查询失败不阻断
   }
-  const lang = SITE_TO_LANG[site] ?? "th";
+  // 站点 → 语言走统一映射：不要在场景层写死语言，否则站点一换文案就跑偏
+  const lang = languageForSite(site);
 
   if (!detailIds.length) {
     return {
@@ -446,7 +486,7 @@ export async function runMiaoshouSceneQuery(
       // API 返回字段为 detailList（参考 Python collectbox_crud.py）
       const list = data?.detailList ?? data?.list ?? [];
       return {
-        content: `我已读取妙手公共采集箱，共 ${data?.total ?? list.length} 个商品。`,
+        content: `已读取妙手公共采集箱，共 ${data?.total ?? list.length} 个商品。`,
         artifact: recordsArtifact({
           headline: "公共采集箱",
           records: list,
@@ -468,8 +508,11 @@ export async function runMiaoshouSceneQuery(
       const data = result.data as { detailList?: Array<Record<string, unknown>>; list?: Array<Record<string, unknown>>; total?: number } | undefined;
       // API 返回字段为 detailList（经实际验证确认）
       const list = data?.detailList ?? data?.list ?? [];
+      const count = data?.total ?? list.length;
       return {
-        content: `我已读取 TikTok 采集箱，共 ${data?.total ?? list.length} 个商品。`,
+        content: count
+          ? `TikTok 采集箱里有 ${count} 个商品，可以直接进入发布流程。`
+          : "TikTok 采集箱是空的。商品要先从公共采集箱认领过来才会出现在这里，认领之后才能做类目匹配和发布。",
         artifact: recordsArtifact({
           headline: "TikTok 采集箱",
           records: list,
@@ -487,25 +530,45 @@ export async function runMiaoshouSceneQuery(
     }
 
     case "tiktok_categories": {
-      const result = await miaoshouGetTikTokCategoryTree("TH");
+      // 类目站点必须跟随店铺实际站点，不能写死
+      const site = await miaoshouResolveSite();
+      if (!site) {
+        return {
+          content: "没有从妙手读到已授权的 TikTok 店铺，无法确定该用哪个站点的类目树。请先在妙手后台完成店铺授权。",
+          artifact: recordsArtifact({
+            headline: "TikTok 类目列表",
+            records: [],
+            columns: [{ key: "info", label: "说明" }],
+            source: `妙手开放平台 · ${now}`,
+            emptyLabel: "妙手账号下没有可用的 TikTok 店铺。",
+          }),
+        };
+      }
+      const result = await miaoshouGetTikTokCategoryTree(site);
       const data = result.data as { cateTree?: Record<string, unknown> } | undefined;
-      const cateTree = data?.cateTree ?? {};
-      // 将嵌套的 cateTree 对象转换为扁平列表
-      const categories = Object.values(cateTree).map((cat: unknown) => {
-        const c = cat as Record<string, unknown>;
-        return { id: c.cid, name: c.nameChinese || c.name, parentId: c.fid, isLeaf: c.isLastLevel };
-      });
+      const all = flattenCategoryTree(data?.cateTree ?? {});
+      const leaves = all.filter((node) => node.isLeaf);
+      const categories = leaves.slice(0, MAX_CATEGORY_ROWS).map((node) => ({
+        id: node.id,
+        name: node.name,
+        path: node.path,
+        isLeaf: "是",
+      }));
+      const truncated = leaves.length > MAX_CATEGORY_ROWS
+        ? `，仅展示前 ${MAX_CATEGORY_ROWS} 个`
+        : "";
       return {
-        content: `我已读取 TikTok 类目树，共 ${categories.length} 个一级类目。`,
+        content: `已读取 ${site} 站类目树：共 ${all.length} 个类目，其中末级类目 ${leaves.length} 个${truncated}。末级类目才是选品时可以填的 cid。`,
         artifact: recordsArtifact({
-          headline: "TikTok 类目列表",
+          headline: `TikTok 类目列表 · ${site}`,
           records: categories,
           columns: [
             { key: "id", label: "类目 ID" },
             { key: "name", label: "类目名称" },
-            { key: "isLeaf", label: "叶子类目" },
+            { key: "path", label: "类目路径" },
+            { key: "isLeaf", label: "末级" },
           ],
-          source: `妙手开放平台 · get_category_tree_by_site · ${now}`,
+          source: `妙手开放平台 · get_category_tree_by_site(${site}) · ${now}`,
           emptyLabel: "未返回类目数据。",
         }),
       };
@@ -678,13 +741,45 @@ export async function runMiaoshouSceneQuery(
       const result = await miaoshouGetShopList("tiktok", "all");
       const data = result.data as { shopList?: Array<Record<string, unknown>> } | undefined;
       const list = data?.shopList ?? [];
+      if (!list.length) {
+        return {
+          content: "妙手账号下还没有授权任何 TikTok 店铺，所以采集、认领、发布这些操作暂时都做不了。请先到妙手后台完成店铺授权，再回来查询。",
+          artifact: recordsArtifact({
+            headline: "妙手授权店铺",
+            records: [],
+            columns: [{ key: "info", label: "说明" }],
+            source: `妙手开放平台 · get_shop_list · ${now}`,
+            emptyLabel: "妙手尚未授权任何店铺。",
+          }),
+        };
+      }
+      const names = list
+        .map((shop) => {
+          const name = String(shop.platformShopName ?? shop.shopName ?? shop.shopNick ?? "").trim();
+          const site = String(shop.siteName ?? shop.site ?? "").trim();
+          return name ? `${name}（${site || "站点未知"}）` : "";
+        })
+        .filter(Boolean);
+      const abnormal = list.filter((shop) => String(shop.status ?? "normal").toLowerCase() !== "normal");
+      const statusNote = abnormal.length
+        ? `其中 ${abnormal.length} 个店铺状态异常（${abnormal.map((s) => String(s.status ?? "")).join("、")}），需要去妙手后台确认授权。`
+        : "授权状态全部正常。";
+      const detail = list
+        .map((shop) => {
+          const id = String(shop.shopId ?? "");
+          const status = String(shop.status ?? "normal");
+          const expire = String(shop.gmtExpire ?? "");
+          return `店铺编号 ${id}，状态 ${status}${expire ? `，妙手侧授权到期 ${expire}` : ""}`;
+        })
+        .join("；");
       return {
-        content: `我已读取妙手已授权的店铺列表，共 ${list.length} 个店铺。`,
+        content: `妙手账号下已授权 ${list.length} 个 TikTok 店铺：${names.join("、")}。${detail}。${statusNote}采集、认领、发布都会落到这个店铺。`,
         artifact: recordsArtifact({
           headline: "妙手授权店铺",
           records: list,
           columns: [
             { key: "shopId", label: "店铺 ID" },
+            { key: "platformShopName", label: "店铺" },
             { key: "siteName", label: "站点" },
             { key: "platform", label: "平台" },
             { key: "status", label: "状态" },
@@ -892,7 +987,7 @@ export async function runMiaoshouSceneQuery(
         throw error;
       }
       return {
-        content: `我已读取发布记录，共 ${total} 条。`,
+        content: `已读取发布记录，共 ${total} 条。`,
         artifact: recordsArtifact({
           headline: "TikTok 发布记录",
           records: list,
@@ -932,7 +1027,7 @@ export async function runMiaoshouSceneQuery(
         throw error;
       }
       return {
-        content: `我已读取定价模板，共 ${list.length} 个。`,
+        content: `已读取定价模板，共 ${list.length} 个。`,
         artifact: recordsArtifact({
           headline: "TikTok 定价模板",
           records: list,
@@ -953,7 +1048,7 @@ export async function runMiaoshouSceneQuery(
       const data = result.data as { orderPackageList?: Array<Record<string, unknown>>; total?: number } | undefined;
       const list = data?.orderPackageList ?? [];
       return {
-        content: `我已读取妙手包裹列表，共 ${data?.total ?? list.length} 个。`,
+        content: `已读取妙手包裹列表，共 ${data?.total ?? list.length} 个。`,
         artifact: recordsArtifact({
           headline: "妙手包裹",
           records: list,
@@ -995,7 +1090,7 @@ export async function runMiaoshouSceneQuery(
         throw error;
       }
       return {
-        content: `我已读取妙手退货退款列表，共 ${total} 条。`,
+        content: `已读取妙手退货退款列表，共 ${total} 条。`,
         artifact: recordsArtifact({
           headline: "妙手退货退款",
           records: list,
@@ -1017,7 +1112,7 @@ export async function runMiaoshouSceneQuery(
       const data = result.data as { goodsPurchaseOrderList?: Array<Record<string, unknown>>; total?: number } | undefined;
       const list = data?.goodsPurchaseOrderList ?? [];
       return {
-        content: `我已读取妙手采购单列表，共 ${data?.total ?? list.length} 条。`,
+        content: `已读取妙手采购单列表，共 ${data?.total ?? list.length} 条。`,
         artifact: recordsArtifact({
           headline: "妙手采购单",
           records: list,
@@ -1039,7 +1134,7 @@ export async function runMiaoshouSceneQuery(
       const data = result.data as { goodsSkuWarehouseList?: Array<Record<string, unknown>>; total?: number } | undefined;
       const list = data?.goodsSkuWarehouseList ?? [];
       return {
-        content: `我已读取妙手库存列表，共 ${data?.total ?? list.length} 条。`,
+        content: `已读取妙手库存列表，共 ${data?.total ?? list.length} 条。`,
         artifact: recordsArtifact({
           headline: "妙手库存",
           records: list,

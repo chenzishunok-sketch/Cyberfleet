@@ -47,16 +47,20 @@ describe("TMAPI 1688 integration", () => {
     expect(requestedUrl.searchParams.get("item_id")).toBe("648795280915");
     expect(requestedUrl.searchParams.get("language")).toBe("th");
     expect(requestedUrl.searchParams.get("scene")).toBe("drop_shipping");
-    expect(requestedUrl.searchParams.get("apiToken")).toBe("test-token");
+    // TMAPI 鉴权走 apikey 请求头，token 不应出现在 query 里（放 query 会被 401 拒）
+    expect(requestedUrl.searchParams.get("apiToken")).toBeNull();
+    const requestInit = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = new Headers(requestInit?.headers);
+    expect(headers.get("apikey")).toBe("test-token");
   });
 
   it("turns a 1688 link into a readable SKU report", async () => {
     vi.stubEnv("TMAPI_API_TOKEN", "test-token");
     vi.stubEnv("TMAPI_BASE_URL", "http://api.tmapi.test");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(itemResponse), { status: 200 }));
-    const intent = inferTmapiItemIntent("帮我分析这个泰国一件代发商品 https://detail.1688.com/offer/648795280915.html");
+    const intent = inferTmapiItemIntent("帮我分析这个日本一件代发商品 https://detail.1688.com/offer/648795280915.html");
 
-    expect(intent).toEqual({ itemId: "648795280915", options: { language: "th", scene: "drop_shipping" } });
+    expect(intent).toEqual({ itemId: "648795280915", options: { language: "ja", scene: "drop_shipping" } });
     const result = await runTmapiItemScene(intent!);
     expect(result.content).toContain("采购价 12.50-15.00 CNY");
     expect(result.artifact.rows[0]).toMatchObject({ sku_id: "sku-1", weight_kg: "0.4", dimensions_cm: "20x10x5" });

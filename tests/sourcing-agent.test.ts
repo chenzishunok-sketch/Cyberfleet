@@ -19,14 +19,12 @@ describe("货源选品 Agent", () => {
 
   it("识别上传图片、售价和选品筛选条件", () => {
     const intent = inferSourcingIntent({
-      message: "帮我找1688同款，只看工厂，采购价不超过5元，售价199THB，目标利润率25%",
+      message: "帮我找1688同款，只看工厂，采购价不超过5元",
       attachments: [image],
     });
 
     expect(intent).toMatchObject({
       image,
-      requestedSalePriceThb: 199,
-      targetMargin: 0.25,
       maxPurchasePriceCny: 5,
       factoryOnly: true,
       supportDropshipping: true,
@@ -116,9 +114,8 @@ describe("货源选品 Agent", () => {
       }],
     });
     const candidate = result.artifact!.candidates[0];
-    expect(candidate.salePriceThb).toBe(candidate.suggestedSalePriceThb);
-    expect(candidate.expectedMargin).toBeGreaterThanOrEqual(0.19);
-    expect(candidate.expectedProfitThb).toBeGreaterThan(0);
+    // 不再做利润预估：只核到岸成本口径（采购价 + 国内运费）
+    expect(candidate.landedCostCny).toBeCloseTo(5.5, 5);
     expect(candidate.warnings).toEqual([]);
     expect(convertAttempts).toBe(2);
     expect(fetchMock.mock.calls.some(([input]) => new URL(String(input)).hostname === "paste.c-net.org")).toBe(true);

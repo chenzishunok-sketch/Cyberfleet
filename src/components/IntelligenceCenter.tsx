@@ -319,7 +319,7 @@ export function IntelligenceCenter({ skillsCatalog, onOpenSkillManager }: Intell
         <>
           <section className="retrieval-tester">
             <div><strong>测试 Agent 会找到什么</strong><span>输入一个真实问题，检查会被送进 LLM 的相关知识。</span></div>
-            <div className="retrieval-controls"><input value={testQuery} onChange={(event) => setTestQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void testRetrieval(); }} placeholder="例如：泰国店铺如何判断商品是否值得上架？" /><select value={testScope} onChange={(event) => setTestScope(event.target.value as AgentContext)}>{AGENT_CONTEXTS.map((scope) => <option value={scope} key={scope}>{SCOPE_LABELS[scope]}</option>)}</select><button className="secondary-button" disabled={testQuery.trim().length < 2 || testing} onClick={() => void testRetrieval()}>{testing ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />}测试检索</button></div>
+            <div className="retrieval-controls"><input value={testQuery} onChange={(event) => setTestQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void testRetrieval(); }} placeholder="例如：日本店铺如何判断商品是否值得上架？" /><select value={testScope} onChange={(event) => setTestScope(event.target.value as AgentContext)}>{AGENT_CONTEXTS.map((scope) => <option value={scope} key={scope}>{SCOPE_LABELS[scope]}</option>)}</select><button className="secondary-button" disabled={testQuery.trim().length < 2 || testing} onClick={() => void testRetrieval()}>{testing ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />}测试检索</button></div>
             {matches && <div className="retrieval-results">{matches.length ? matches.map((match) => <div key={match.entry.id}><span>{CATEGORY_LABELS[match.entry.category]}</span><strong>{match.entry.title}</strong><small>相关度 {Math.round(match.score)}</small></div>) : <p>没有匹配到知识。可以补充相关资料或增加更明确的标题和标签。</p>}</div>}
           </section>
           <div className="knowledge-list">
@@ -343,7 +343,7 @@ export function IntelligenceCenter({ skillsCatalog, onOpenSkillManager }: Intell
           ) : (
             <>
               <div className="web-search-controls">
-                <label className="web-search-query"><Search size={17} /><input value={webQuery} onChange={(event) => setWebQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void runWebSearch(); }} placeholder="例如：TikTok Shop 泰国站 2026 年最新佣金政策" /></label>
+                <label className="web-search-query"><Search size={17} /><input value={webQuery} onChange={(event) => setWebQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void runWebSearch(); }} placeholder="例如：TikTok Shop 日本站 2026 年最新佣金政策" /></label>
                 <select value={webTopic} onChange={(event) => setWebTopic(event.target.value as WebSearchTopic)} aria-label="搜索类型"><option value="general">综合资料</option><option value="news">近期新闻</option></select>
                 <select value={webTimeRange} onChange={(event) => setWebTimeRange(event.target.value as WebSearchTimeRange | "")} aria-label="时间范围"><option value="">不限时间</option><option value="day">近 24 小时</option><option value="week">近 7 天</option><option value="month">近 30 天</option><option value="year">近 1 年</option></select>
                 <button className="primary-button" disabled={webQuery.trim().length < 2 || webSearching} onClick={() => void runWebSearch()}>{webSearching ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}{webSearching ? "搜索中" : "搜索"}</button>
@@ -359,11 +359,11 @@ export function IntelligenceCenter({ skillsCatalog, onOpenSkillManager }: Intell
 
 function KnowledgeForm({ draft, editing, saving, onChange, onCancel, onSave }: { draft: KnowledgeDraft; editing: boolean; saving: boolean; onChange: (draft: KnowledgeDraft) => void; onCancel: () => void; onSave: () => void }) {
   return <section className="intelligence-editor"><div className="intelligence-editor-head"><div><strong>{editing ? "编辑知识" : "添加业务知识"}</strong><span>标题和标签越明确，Agent 越容易在正确的问题中找到它。</span></div><button className="icon-button" onClick={onCancel} aria-label="关闭"><X size={16} /></button></div><div className="intelligence-form-grid">
-    <label className="wide"><span>标题</span><input value={draft.title} onChange={(event) => onChange({ ...draft, title: event.target.value })} placeholder="例如：泰国店铺商品利润判断规则" /></label>
+    <label className="wide"><span>标题</span><input value={draft.title} onChange={(event) => onChange({ ...draft, title: event.target.value })} placeholder="例如：日本店铺商品选品标准" /></label>
     <label><span>类型</span><select value={draft.category} onChange={(event) => onChange({ ...draft, category: event.target.value as KnowledgeCategory })}>{Object.entries(CATEGORY_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
     <label><span>适用范围</span><select value={draft.scope} onChange={(event) => onChange({ ...draft, scope: event.target.value as IntelligenceScope })}>{scopeOptions().map((scope) => <option value={scope} key={scope}>{SCOPE_LABELS[scope]}</option>)}</select></label>
     <label><span>来源</span><input value={draft.source} onChange={(event) => onChange({ ...draft, source: event.target.value })} placeholder="文件名、网址或经验来源" /></label>
-    <label><span>标签</span><input value={draft.tags} onChange={(event) => onChange({ ...draft, tags: event.target.value })} placeholder="利润、泰国、上架（用逗号分隔）" /></label>
+    <label><span>标签</span><input value={draft.tags} onChange={(event) => onChange({ ...draft, tags: event.target.value })} placeholder="选品、日本、上架（用逗号分隔）" /></label>
     <label className="wide"><span>知识正文</span><textarea rows={8} value={draft.content} onChange={(event) => onChange({ ...draft, content: event.target.value })} placeholder="写清楚适用条件、判断方法、默认值、例外情况和数据来源。" /></label>
   </div><div className="intelligence-editor-actions"><button className="secondary-button" onClick={onCancel}>取消</button><button className="primary-button" disabled={!draft.title.trim() || draft.content.trim().length < 10 || saving} onClick={onSave}>{saving && <LoaderCircle className="spin" size={15} />}{saving ? "保存中" : "保存并启用"}</button></div></section>;
 }

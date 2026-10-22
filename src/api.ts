@@ -10,11 +10,6 @@ import type {
   KolOutreachWorkflowRun,
   KolStats,
   ProductPublishWorkflowRun,
-  PricingDefaults,
-  SkuActualSettlementInput,
-  SkuPricingInput,
-  SkuPricingRecord,
-  SupplierPricingPreview,
   TikTokCapabilitiesResponse,
   SkillsCatalogResponse,
   SkillStatus,
@@ -149,17 +144,6 @@ export const api = {
   kolStats: () => request<{ stats: KolStats; source: "browser_bridge" }>("/api/kol/stats"),
 
   workflows: () => request<WorkflowListResponse>("/api/workflows"),
-  pricingRecords: (workflowId?: string) => request<{ records: SkuPricingRecord[] }>(`/api/pricing${workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : ""}`),
-  pricingHistory: (workflowId: string) => request<{ records: SkuPricingRecord[] }>(`/api/pricing/history/${encodeURIComponent(workflowId)}`),
-  syncPricingRecords: () => request<{ records: SkuPricingRecord[]; totalProducts: number; totalSkus: number; created: number; updated: number; unchanged: number; missingCost: number; inactiveProducts: number; inactiveSkus: number; matchedCategoryProducts: number; unmatchedCategoryProducts: number }>("/api/pricing/sync", { method: "POST" }),
-  updateProductPricing: (productId: string, values: Partial<SkuPricingInput>) =>
-    request<{ records: SkuPricingRecord[]; updated: number }>(`/api/pricing/product/${encodeURIComponent(productId)}`, { method: "PATCH", body: JSON.stringify({ values }) }),
-  preview1688Pricing: (productId: string, sourceUrl: string) =>
-    request<{ preview: SupplierPricingPreview }>(`/api/pricing/product/${encodeURIComponent(productId)}/1688/preview`, { method: "POST", body: JSON.stringify({ sourceUrl }) }),
-  apply1688Pricing: (productId: string, sourceUrl: string) =>
-    request<{ records: SkuPricingRecord[]; updated: number; linked: number; preview: SupplierPricingPreview }>(`/api/pricing/product/${encodeURIComponent(productId)}/1688/apply`, { method: "POST", body: JSON.stringify({ sourceUrl }) }),
-  updatePricingRecord: (id: string, input: { input?: Partial<SkuPricingInput>; actual?: Partial<SkuActualSettlementInput> }) =>
-    request<{ record: SkuPricingRecord }>(`/api/pricing/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(input) }),
   workflow: (id: string) => request<{ run: BusinessWorkflowRun }>(`/api/workflows/${id}`),
   workflowHistory: (id: string) => request<{ events: WorkflowHistoryItem[] }>(`/api/workflows/${id}/history`),
   startProductPublishWorkflow: (input: {
@@ -182,6 +166,7 @@ export const api = {
     endAt: string;
     priceAmount: string;
     currency?: string;
+    pricingLevel?: "PRODUCT" | "VARIATION";
     skuIds?: string[];
     skuQuantityLimit: number;
     quantityPerUser: number;
@@ -202,8 +187,6 @@ export const api = {
     }),
   updateWorkflowProductInput: (id: string, input: { publishPrice: number; packageDimensions?: { length: number; width: number; height: number }; title?: string; description?: string }) =>
     request<{ run: ProductPublishWorkflowRun }>(`/api/workflows/${id}/product-input`, { method: "POST", body: JSON.stringify(input) }),
-  updateWorkflowPricing: (id: string, input: { defaults?: Partial<PricingDefaults>; skus?: Array<{ skuKey: string; values: Partial<SkuPricingInput> }>; removedSkuKeys?: string[] }) =>
-    request<{ run: ProductPublishWorkflowRun }>(`/api/workflows/${id}/pricing`, { method: "POST", body: JSON.stringify(input) }),
   approveWorkflow: (id: string) => request<{ run: BusinessWorkflowRun }>(`/api/workflows/${id}/approve`, { method: "POST" }),
   retryWorkflow: (id: string) => request<{ run: BusinessWorkflowRun }>(`/api/workflows/${id}/retry`, { method: "POST" }),
   verifyWorkflow: (id: string) => request<{ run: BusinessWorkflowRun }>(`/api/workflows/${id}/verify`, { method: "POST" }),

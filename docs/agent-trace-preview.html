@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>等待期执行轨迹 · 设计预览</title>
+<style>
+  :root {
+    --ink: #1d1d1f;
+    --muted: #6e6e73;
+    --subtle: #8e8e93;
+    --line: rgba(60, 60, 67, 0.10);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 40px 28px 60px;
+    background: #fbfbfd;
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .page-title { margin: 0 0 6px; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .page-sub { margin: 0 0 34px; font-size: 13px; color: var(--muted); line-height: 1.7; }
+  .case { margin-bottom: 30px; }
+  .case-label {
+    display: flex; align-items: baseline; gap: 10px;
+    margin-bottom: 9px; font-size: 12px; color: var(--subtle);
+  }
+  .case-label b { font-weight: 600; color: #3c3c43; font-size: 12.5px; }
+  .bubble {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 16px 18px;
+  }
+  .who { margin: 0 0 10px; font-size: 12px; color: var(--subtle); }
+
+  /* ── 以下为组件样式，与 src/styles.css 中一致 ── */
+  .agent-trace {
+    margin-top: 10px;
+    padding: 13px 14px 11px;
+    max-width: 560px;
+    background: #f7f8fa;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+  }
+  .agent-trace-head { display: flex; align-items: center; gap: 8px; min-height: 18px; }
+  .agent-trace-pulse {
+    flex: none; width: 7px; height: 7px; border-radius: 50%;
+    background: #0071e3; animation: tracePulse 1.4s ease-in-out infinite;
+  }
+  .agent-trace-title { font-size: 12.5px; font-weight: 500; color: #3c3c43; }
+  .agent-trace-timer {
+    margin-left: auto; font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--subtle);
+  }
+  .agent-trace-bar {
+    position: relative; height: 2px; margin: 9px 0 4px;
+    overflow: hidden; background: rgba(60, 60, 67, 0.08); border-radius: 2px;
+  }
+  .agent-trace-bar-fill {
+    position: absolute; inset: 0 auto 0 0; width: 38%;
+    background: linear-gradient(90deg, rgba(0,113,227,0), rgba(0,113,227,.75), rgba(0,113,227,0));
+    animation: traceFlow 1.5s cubic-bezier(.4,0,.2,1) infinite;
+  }
+  .agent-trace-list { max-height: 190px; overflow-y: auto; margin-top: 6px; }
+  .trace-row {
+    position: relative; display: flex; align-items: baseline; gap: 8px;
+    padding: 5px 6px; overflow: hidden; border-radius: 7px;
+    animation: traceIn .28s ease-out both;
+  }
+  .trace-icon {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 15px; height: 15px; margin-top: 1px; color: #30a14e;
+  }
+  .trace-label { flex: none; font-size: 12.5px; color: #3c3c43; }
+  .trace-detail {
+    min-width: 0; overflow: hidden; font-size: 11.5px; color: var(--subtle);
+    white-space: nowrap; text-overflow: ellipsis;
+  }
+  .trace-row--running { background: rgba(0,113,227,.07); }
+  .trace-row--running .trace-icon { color: #0071e3; }
+  .trace-row--running .trace-label { font-weight: 500; color: #0060c0; }
+  .trace-shimmer {
+    position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(0,113,227,.12), transparent);
+    animation: traceSweep 1.8s ease-in-out infinite;
+  }
+  .spin { animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes tracePulse {
+    0%,100% { opacity: 1; transform: scale(1); }
+    50% { opacity: .35; transform: scale(.82); }
+  }
+  @keyframes traceFlow {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(340%); }
+  }
+  @keyframes traceIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes traceSweep {
+    0% { transform: translateX(-100%); }
+    60%,100% { transform: translateX(100%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .agent-trace-pulse, .agent-trace-bar-fill, .trace-shimmer, .trace-row { animation: none; }
+  }
+
+  /* 完成态 */
+  .streaming-text { white-space: pre-wrap; margin: 0; font-size: 13.5px; line-height: 1.75; color: #1d1d1f; }
+  .typing-cursor {
+    display: inline-block; width: 2px; height: 1.1em; margin-left: 1px;
+    background: currentColor; vertical-align: text-bottom; animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .note {
+    margin-top: 10px; padding: 11px 13px; font-size: 12px; line-height: 1.7;
+    color: #6e6e73; background: #f2f4f7; border-radius: 10px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 class="page-title">等待期执行轨迹</h1>
+  <p class="page-sub">同一个组件的三个时间点。动画会循环播放，可以直接观察节奏。</p>
+
+  <div class="case">
+    <div class="case-label"><b>① 刚发出 · 1 秒</b>只有一句阶段提示，不假装已经知道细节</div>
+    <div class="bubble">
+      <p class="who">跨境电商 · 运营总监</p>
+      <div class="agent-trace">
+        <div class="agent-trace-head">
+          <span class="agent-trace-pulse"></span>
+          <span class="agent-trace-title">正在理解你的问题</span>
+          <span class="agent-trace-timer">1s</span>
+        </div>
+        <div class="agent-trace-bar"><span class="agent-trace-bar-fill"></span></div>
+        <div class="agent-trace-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="case">
+    <div class="case-label"><b>② 并行读数据 · 8 秒</b>同时查多项时都能看到，不用猜在等哪一步</div>
+    <div class="bubble">
+      <p class="who">跨境电商 · 运营总监</p>
+      <div class="agent-trace">
+        <div class="agent-trace-head">
+          <span class="agent-trace-pulse"></span>
+          <span class="agent-trace-title">正在并行读取 2 项数据</span>
+          <span class="agent-trace-timer">8s</span>
+        </div>
+        <div class="agent-trace-bar"><span class="agent-trace-bar-fill"></span></div>
+        <div class="agent-trace-list">
+          <div class="trace-row">
+            <span class="trace-icon">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            </span>
+            <span class="trace-label">确认店铺范围</span>
+            <span class="trace-detail">Cashio · JP</span>
+          </div>
+          <div class="trace-row">
+            <span class="trace-icon">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            </span>
+            <span class="trace-label">读取 TikTok Shop</span>
+            <span class="trace-detail">订单、商品与退货退款接口</span>
+          </div>
+          <div class="trace-row trace-row--running">
+            <span class="trace-icon">
+              <svg class="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
+            </span>
+            <span class="trace-label">查询销售数据</span>
+            <span class="trace-detail">正在读取真实数据…</span>
+            <span class="trace-shimmer"></span>
+          </div>
+          <div class="trace-row trace-row--running">
+            <span class="trace-icon">
+              <svg class="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
+            </span>
+            <span class="trace-label">查询商品列表</span>
+            <span class="trace-detail">正在读取真实数据…</span>
+            <span class="trace-shimmer"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="case">
+    <div class="case-label"><b>③ 收尾中 · 38 秒</b>阶段提示自动递进，秒表让人知道没卡死</div>
+    <div class="bubble">
+      <p class="who">跨境电商 · 运营总监</p>
+      <div class="agent-trace">
+        <div class="agent-trace-head">
+          <span class="agent-trace-pulse"></span>
+          <span class="agent-trace-title">仍在读取，商品较多的店铺会慢一些</span>
+          <span class="agent-trace-timer">38s</span>
+        </div>
+        <div class="agent-trace-bar"><span class="agent-trace-bar-fill"></span></div>
+        <div class="agent-trace-list">
+          <div class="trace-row">
+            <span class="trace-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+            <span class="trace-label">查询店铺信息</span>
+            <span class="trace-detail">Cashio，站点 JP，币种 JPY</span>
+          </div>
+          <div class="trace-row">
+            <span class="trace-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+            <span class="trace-label">查询销售数据</span>
+            <span class="trace-detail">近7天：198个已支付订单…</span>
+          </div>
+          <div class="trace-row">
+            <span class="trace-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+            <span class="trace-label">查询退款数据</span>
+            <span class="trace-detail">近7天7个退货退款申请…</span>
+          </div>
+          <div class="trace-row">
+            <span class="trace-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+            <span class="trace-label">查询商品列表</span>
+            <span class="trace-detail">99 个在售商品…</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="case">
+    <div class="case-label"><b>④ 开始出字</b>轨迹面板收起，注意力交给正文</div>
+    <div class="bubble">
+      <p class="who">跨境电商 · 运营总监</p>
+      <p class="streaming-text">近 7 天销售明显下滑：支付 GMV 为 JP¥630,926，较前一周期下降 31.4%；订单 198 个，下降 52.3%<span class="typing-cursor"></span></p>
+    </div>
+  </div>
+
+  <div class="note">
+    动画只在等待期出现，出字后自动撤掉；系统设置里开启「减少动态效果」时会自动降级为静态。
+  </div>
+</div>
+</body>
+</html>

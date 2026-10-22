@@ -18,7 +18,7 @@ vi.mock("../server/tiktok-auth.ts", () => ({
   readStoredAuthorization: vi.fn(async () => ({
     selectedShopCipher: "cipher-th",
     grantedScopes: ["seller.product.write"],
-    shops: [{ id: "shop-th", name: "Mikolo", cipher: "cipher-th", region: "TH" }],
+    shops: [{ id: "shop-jp", name: "Mikolo", cipher: "cipher-th", region: "JP" }],
   })),
   getAuthorizedTikTokClient: vi.fn(async () => ({ request: state.request })),
 }));
@@ -27,7 +27,7 @@ vi.mock("../server/tiktok-data.ts", () => ({
   clearTikTokDataCache: vi.fn(),
   getCurrentDashboard: vi.fn(async () => ({
     dataSource: "tiktok",
-    store: { id: "shop-th", name: "Mikolo", region: "TH", currency: "THB", timezone: "Asia/Bangkok", connected: true },
+    store: { id: "shop-jp", name: "Mikolo", region: "JP", currency: "JPY", timezone: "Asia/Tokyo", connected: true },
     metrics: [], salesSeries: [], products: [], automations: [], activity: [], alerts: [], dataAsOf: "now",
   })),
 }));

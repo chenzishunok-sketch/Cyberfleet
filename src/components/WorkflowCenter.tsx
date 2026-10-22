@@ -4,7 +4,6 @@ import {
   ArrowRight,
   Ban,
   Bot,
-  Calculator,
   CircleDollarSign,
   Download,
   Check,
@@ -40,8 +39,6 @@ import type {
   FlashSaleWorkflowRun,
   KolOutreachWorkflowRun,
   ProductPublishWorkflowRun,
-  PricingDefaults,
-  SkuPricingInput,
   WorkflowStatus,
   WorkflowStep,
   WorkflowHistoryItem,
@@ -94,7 +91,6 @@ const NODE_CATALOG: Omit<BlueprintNode, "id">[] = [
   { kind: "trigger", label: "手动发起", detail: "由你点击开始" },
   { kind: "trigger", label: "飞书消息", detail: "收到指定消息后启动" },
   { kind: "agent", label: "选品 Agent", detail: "识别货源并初筛商品" },
-  { kind: "agent", label: "定价 Agent", detail: "计算成本、保本价和利润" },
   { kind: "agent", label: "采集 Agent", detail: "采集到妙手公共采集箱" },
   { kind: "agent", label: "上架 Agent", detail: "认领、编辑并发布商品" },
   { kind: "agent", label: "达人 BD Agent", detail: "筛选达人并执行建联" },
@@ -116,41 +112,10 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     nodes: [
       { id: "source", kind: "trigger", label: "1688 链接", detail: "手动提交货源" },
       { id: "sourcing", kind: "agent", label: "选品 Agent", detail: "读取货源和 SKU" },
-      { id: "pricing", kind: "agent", label: "定价 Agent", detail: "核算利润" },
       { id: "approve", kind: "approval", label: "上架审批", detail: "确认价格和商品资料" },
       { id: "collect", kind: "agent", label: "采集 Agent", detail: "写入妙手" },
       { id: "publish", kind: "agent", label: "上架 Agent", detail: "发布并回查" },
       { id: "record", kind: "result", label: "SKU 台账", detail: "保存商品对应关系" },
-    ],
-  },
-  {
-    id: "sku-cost-profit",
-    name: "SKU 成本补全与利润计算",
-    description: "补全采购、物流、广告和达人佣金，生成可导出的 SKU 利润台账。",
-    category: "定价",
-    launch: "chat",
-    prompt: "查询哪些 SKU 还缺成本，并生成成本补全与利润计算任务",
-    nodes: [
-      { id: "sync", kind: "tool", label: "同步 TikTok SKU", detail: "读取商品与售价" },
-      { id: "cost", kind: "agent", label: "商品管理 Agent", detail: "检查缺失成本" },
-      { id: "pricing", kind: "agent", label: "定价 Agent", detail: "重新计算利润" },
-      { id: "confirm", kind: "approval", label: "成本确认", detail: "确认默认值和修改值" },
-      { id: "ledger", kind: "result", label: "SKU 利润台账", detail: "保存历史并可导出" },
-    ],
-  },
-  {
-    id: "loss-price",
-    name: "亏损商品识别与改价",
-    description: "找出低于保本价的 SKU，生成改价方案，审批后写入 TikTok。",
-    category: "定价",
-    launch: "chat",
-    prompt: "找出所有预计亏损的 SKU，生成改价方案，但在真正改价前先让我审批",
-    nodes: [
-      { id: "scan", kind: "agent", label: "商品管理 Agent", detail: "扫描 SKU 利润" },
-      { id: "loss", kind: "condition", label: "是否亏损？", detail: "对比保本价" },
-      { id: "plan", kind: "agent", label: "定价 Agent", detail: "生成建议售价" },
-      { id: "approve", kind: "approval", label: "改价审批", detail: "逐项展示前后价格" },
-      { id: "write", kind: "tool", label: "TikTok 改价", detail: "写入后回查" },
     ],
   },
   {
@@ -284,151 +249,6 @@ function percent(value: number): string {
   return Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : "--";
 }
 
-function PricingCard({
-  run,
-  editable,
-  busy,
-  onSubmit,
-}: {
-  run: ProductPublishWorkflowRun;
-  editable: boolean;
-  busy: boolean;
-  onSubmit: (input: { defaults: Partial<PricingDefaults>; skus: Array<{ skuKey: string; values: Partial<SkuPricingInput> }>; removedSkuKeys: string[] }) => void;
-}) {
-  const records = run.pricingSkus ?? [];
-  const tableWrapRef = useRef<HTMLDivElement>(null);
-  const dragState = useRef({ active: false, pointerId: -1, startX: 0, scrollLeft: 0 });
-  const [dragging, setDragging] = useState(false);
-  const [removedSkuKeys, setRemovedSkuKeys] = useState<Set<string>>(() => new Set());
-  const [defaults, setDefaults] = useState(() => ({
-    exchangeRateCnyToThb: String(run.pricingDefaults?.exchangeRateCnyToThb ?? 4.8503),
-    domesticLogisticsCny: String(run.pricingDefaults?.domesticLogisticsCny ?? 2.5),
-    cloudWarehouseCny: String(run.pricingDefaults?.cloudWarehouseCny ?? 1.5),
-    buyerLocalDeliveryThb: String(run.pricingDefaults?.buyerLocalDeliveryThb ?? 79),
-    advertisingThb: String(run.pricingDefaults?.advertisingThb ?? 0),
-    creatorCommissionPercent: String((run.pricingDefaults?.creatorCommissionRate ?? 0) * 100),
-  }));
-  const [skuValues, setSkuValues] = useState(() => Object.fromEntries(records.map((record) => [record.skuKey, {
-    salePriceThb: String(record.input.salePriceThb),
-    purchasePriceCny: String(record.input.purchasePriceCny),
-    weightKg: String(record.input.weightKg),
-    taxPercent: String(record.input.taxRate * 100),
-    commissionPercent: String(record.input.categoryCommissionRate * 100),
-  }])));
-
-  useEffect(() => {
-    setRemovedSkuKeys(new Set());
-    setDefaults({
-      exchangeRateCnyToThb: String(run.pricingDefaults?.exchangeRateCnyToThb ?? 4.8503),
-      domesticLogisticsCny: String(run.pricingDefaults?.domesticLogisticsCny ?? 2.5),
-      cloudWarehouseCny: String(run.pricingDefaults?.cloudWarehouseCny ?? 1.5),
-      buyerLocalDeliveryThb: String(run.pricingDefaults?.buyerLocalDeliveryThb ?? 79),
-      advertisingThb: String(run.pricingDefaults?.advertisingThb ?? 0),
-      creatorCommissionPercent: String((run.pricingDefaults?.creatorCommissionRate ?? 0) * 100),
-    });
-    setSkuValues(Object.fromEntries(records.map((record) => [record.skuKey, {
-      salePriceThb: String(record.input.salePriceThb),
-      purchasePriceCny: String(record.input.purchasePriceCny),
-      weightKg: String(record.input.weightKg),
-      taxPercent: String(record.input.taxRate * 100),
-      commissionPercent: String(record.input.categoryCommissionRate * 100),
-    }])));
-  }, [run.updatedAt]);
-
-  if (!records.length) return null;
-  const visibleRecords = records.filter((record) => !removedSkuKeys.has(record.skuKey));
-  const changeDefault = (field: keyof typeof defaults, value: string) => setDefaults((current) => ({ ...current, [field]: value }));
-  const changeSku = (skuKey: string, field: string, value: string) => setSkuValues((current) => ({
-    ...current,
-    [skuKey]: { ...current[skuKey], [field]: value },
-  }));
-  const submit = () => onSubmit({
-    defaults: {
-      exchangeRateCnyToThb: Number(defaults.exchangeRateCnyToThb),
-      domesticLogisticsCny: Number(defaults.domesticLogisticsCny),
-      cloudWarehouseCny: Number(defaults.cloudWarehouseCny),
-      buyerLocalDeliveryThb: Number(defaults.buyerLocalDeliveryThb),
-      advertisingThb: Number(defaults.advertisingThb),
-      creatorCommissionRate: Number(defaults.creatorCommissionPercent) / 100,
-    },
-    skus: visibleRecords.map((record) => ({
-      skuKey: record.skuKey,
-      values: {
-        salePriceThb: Number(skuValues[record.skuKey]?.salePriceThb),
-        purchasePriceCny: Number(skuValues[record.skuKey]?.purchasePriceCny),
-        weightKg: Number(skuValues[record.skuKey]?.weightKg),
-        taxRate: Number(skuValues[record.skuKey]?.taxPercent) / 100,
-        categoryCommissionRate: Number(skuValues[record.skuKey]?.commissionPercent) / 100,
-      },
-    })),
-    removedSkuKeys: [...removedSkuKeys],
-  });
-  const removeSku = (skuKey: string) => {
-    if (visibleRecords.length <= 1) return;
-    setRemovedSkuKeys((current) => new Set([...current, skuKey]));
-  };
-  const startTableDrag = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, a")) return;
-    const element = tableWrapRef.current;
-    if (!element || element.scrollWidth <= element.clientWidth) return;
-    dragState.current = { active: true, pointerId: event.pointerId, startX: event.clientX, scrollLeft: element.scrollLeft };
-    element.setPointerCapture(event.pointerId);
-    setDragging(true);
-    event.preventDefault();
-  };
-  const moveTableDrag = (event: React.PointerEvent<HTMLDivElement>) => {
-    const element = tableWrapRef.current;
-    if (!element || !dragState.current.active || dragState.current.pointerId !== event.pointerId) return;
-    element.scrollLeft = dragState.current.scrollLeft - (event.clientX - dragState.current.startX);
-  };
-  const stopTableDrag = (event: React.PointerEvent<HTMLDivElement>) => {
-    const element = tableWrapRef.current;
-    if (!dragState.current.active || dragState.current.pointerId !== event.pointerId) return;
-    dragState.current.active = false;
-    if (element?.hasPointerCapture(event.pointerId)) element.releasePointerCapture(event.pointerId);
-    setDragging(false);
-  };
-
-  return (
-    <section className={`pricing-card ${editable ? "pricing-card--editable" : ""}`}>
-      <div className="pricing-card-heading">
-        <div><span className="pricing-card-icon"><Calculator size={16} /></span><div><strong>SKU 成本与预估利润</strong><span>按每个 SKU 单独记录，可修改并留存历史</span></div></div>
-        {run.pricingSummary && <div className={`pricing-health ${run.pricingSummary.lossSkus ? "pricing-health--loss" : "pricing-health--ok"}`}><b>{visibleRecords.filter((record) => !record.result.profitable).length}</b><span>亏损 SKU</span></div>}
-      </div>
-      <div className="pricing-default-grid">
-        <label><span>人民币兑泰铢</span><input disabled={!editable} inputMode="decimal" value={defaults.exchangeRateCnyToThb} onChange={(event) => changeDefault("exchangeRateCnyToThb", event.target.value)} /></label>
-        <label><span>国内物流（CNY/件）</span><input disabled={!editable} inputMode="decimal" value={defaults.domesticLogisticsCny} onChange={(event) => changeDefault("domesticLogisticsCny", event.target.value)} /></label>
-        <label><span>云仓（CNY/件）</span><input disabled={!editable} inputMode="decimal" value={defaults.cloudWarehouseCny} onChange={(event) => changeDefault("cloudWarehouseCny", event.target.value)} /></label>
-        <label><span>当地配送（THB/件）</span><input disabled={!editable} inputMode="decimal" value={defaults.buyerLocalDeliveryThb} onChange={(event) => changeDefault("buyerLocalDeliveryThb", event.target.value)} /></label>
-        <label><span>广告（THB/件）</span><input disabled={!editable} inputMode="decimal" value={defaults.advertisingThb} onChange={(event) => changeDefault("advertisingThb", event.target.value)} /></label>
-        <label><span>达人佣金（%）</span><input disabled={!editable} inputMode="decimal" value={defaults.creatorCommissionPercent} onChange={(event) => changeDefault("creatorCommissionPercent", event.target.value)} /></label>
-      </div>
-      <div
-        className={`pricing-table-wrap ${dragging ? "is-dragging" : ""}`}
-        ref={tableWrapRef}
-        onPointerDown={startTableDrag}
-        onPointerMove={moveTableDrag}
-        onPointerUp={stopTableDrag}
-        onPointerCancel={stopTableDrag}
-      ><table className="pricing-table"><thead><tr><th>SKU</th><th>售价 THB</th><th>采购 CNY</th><th>重量 kg</th><th>税率</th><th>平台佣金</th><th>预估利润</th><th>利润率</th><th>保本售价</th>{editable && <th>操作</th>}</tr></thead><tbody>
-        {visibleRecords.map((record) => <tr className={record.result.profitable ? "" : "pricing-row--loss"} key={record.skuKey}>
-          <td><strong>{record.skuName}</strong><small>{record.fieldSources.purchasePriceCny === "1688" ? "采购价来自 1688" : "需人工核对"}</small></td>
-          <td>{editable ? <input inputMode="decimal" value={skuValues[record.skuKey]?.salePriceThb ?? ""} onChange={(event) => changeSku(record.skuKey, "salePriceThb", event.target.value)} /> : money(record.input.salePriceThb)}</td>
-          <td>{editable ? <input inputMode="decimal" value={skuValues[record.skuKey]?.purchasePriceCny ?? ""} onChange={(event) => changeSku(record.skuKey, "purchasePriceCny", event.target.value)} /> : money(record.input.purchasePriceCny)}</td>
-          <td>{editable ? <input inputMode="decimal" value={skuValues[record.skuKey]?.weightKg ?? ""} onChange={(event) => changeSku(record.skuKey, "weightKg", event.target.value)} /> : record.input.weightKg}</td>
-          <td>{editable ? <input inputMode="decimal" value={skuValues[record.skuKey]?.taxPercent ?? ""} onChange={(event) => changeSku(record.skuKey, "taxPercent", event.target.value)} /> : percent(record.input.taxRate)}</td>
-          <td>{editable ? <input inputMode="decimal" value={skuValues[record.skuKey]?.commissionPercent ?? ""} onChange={(event) => changeSku(record.skuKey, "commissionPercent", event.target.value)} /> : percent(record.input.categoryCommissionRate)}</td>
-          <td className={record.result.profitable ? "pricing-positive" : "pricing-negative"}>{money(record.result.expectedProfitThb)}</td>
-          <td>{percent(record.result.expectedMargin)}</td><td>{money(record.result.breakEvenPriceThb)}</td>
-          {editable && <td><button className="pricing-sku-remove" disabled={visibleRecords.length <= 1} title="从待发布商品中移除" aria-label={`移除 ${record.skuName}`} onClick={() => removeSku(record.skuKey)}><Trash2 size={15} /></button></td>}
-        </tr>)}
-      </tbody></table></div>
-      {editable && removedSkuKeys.size > 0 && <div className="pricing-sku-removal-notice"><span>将保留 {visibleRecords.length} 个 SKU，移除 {removedSkuKeys.size} 个。保存后才会应用到妙手。</span><button onClick={() => setRemovedSkuKeys(new Set())}><RotateCcw size={14} />撤销删减</button></div>}
-      <div className="pricing-card-footer"><span>{editable ? "表格可以左右拖动。保存后会重新计算，并把SKU删减加入妙手编辑预览。" : "当前显示的是预估利润；实际结算接入后会另存实际利润。"}</span><div><a className="secondary-button" href={`/api/pricing/export.xlsx?workflowId=${encodeURIComponent(run.id)}`} download><Download size={15} />导出 Excel</a>{editable && <button className="primary-button" disabled={busy} onClick={submit}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存 {visibleRecords.length} 个 SKU</button>}</div></div>
-    </section>
-  );
-}
-
 function ProductRunCard({ initialRun, onChange, compact = false }: RunCardProps<ProductPublishWorkflowRun>) {
   const [run, setRun] = useState(initialRun);
   const [busy, setBusy] = useState<string>();
@@ -488,7 +308,6 @@ function ProductRunCard({ initialRun, onChange, compact = false }: RunCardProps<
       <Progress steps={run.steps} />
       <RunMessages run={run} localError={error} />
 
-      {run.pricingSkus?.length ? <PricingCard run={run} editable={!publishSubmitted && run.steps.find((step) => step.id === "edit")?.status !== "completed" && !new Set<WorkflowStatus>(["running", "completed", "cancelled", "verification_pending"]).has(run.status)} busy={busy === "pricing"} onSubmit={(input) => void act("pricing", () => api.updateWorkflowPricing(run.id, input))} /> : null}
 
       {run.requiredInput?.kind === "shop" && (
         <div className="workflow-input-block"><strong><Store size={15} />{run.requiredInput.prompt}</strong><div className="workflow-shop-options">
@@ -542,7 +361,7 @@ function FlashSaleRunCard({ initialRun, onChange, compact = false }: RunCardProp
   return (
     <article className={`workflow-run workflow-run--${run.status} ${compact ? "workflow-run--compact" : ""}`}>
       <RunHeader run={run} icon={<Zap size={18} />} meta={run.shopName ? `${run.shopName} · ${run.shopRegion ?? ""}` : "TikTok 店铺"} />
-      <div className="workflow-facts"><span>商品 <b>{run.productTitle ?? run.productId}</b></span><span>活动价 <b>{run.priceAmount} {run.currency}</b></span><span>时间 <b>{shortDate(run.startAt)} - {shortDate(run.endAt)}</b></span><span>SKU <b>{run.selectedSkus.length || "待检查"}</b></span>{run.activityId && <span>活动 ID <b>{run.activityId}</b></span>}</div>
+      <div className="workflow-facts"><span>商品 <b>{run.productTitle ?? run.productId}</b></span><span>活动价 <b>{run.priceAmount} {run.currency}</b></span><span>层级 <b>{run.pricingLevel === "VARIATION" ? "按 SKU 定价" : "整品一个价"}</b></span><span>时间 <b>{shortDate(run.startAt)} - {shortDate(run.endAt)}</b></span><span>SKU <b>{run.selectedSkus.length || "待检查"}</b></span>{run.activityId && <span>活动 ID <b>{run.activityId}</b></span>}</div>
       <Progress steps={run.steps} />
       <RunMessages run={run} localError={error} />
       <WorkflowHistory runId={run.id} />
@@ -744,7 +563,7 @@ export function WorkflowCenter({ activeTab, onTabChange, onOpenChat }: WorkflowC
   const [saveNotice, setSaveNotice] = useState<string>();
   const [product, setProduct] = useState({ sourceUrl: "", price: "", length: "", width: "", height: "" });
   const defaultStart = useMemo(() => new Date(Date.now() + 2 * 60 * 60 * 1000), []);
-  const [flash, setFlash] = useState({ productId: "", title: "", startAt: localDateTimeValue(defaultStart), endAt: localDateTimeValue(new Date(defaultStart.getTime() + 8 * 60 * 60 * 1000)), price: "", currency: "THB", quantity: "99", perUser: "20" });
+  const [flash, setFlash] = useState({ productId: "", title: "", startAt: localDateTimeValue(defaultStart), endAt: localDateTimeValue(new Date(defaultStart.getTime() + 8 * 60 * 60 * 1000)), price: "", currency: "JPY", quantity: "99", perUser: "20", level: "PRODUCT" });
 
   useEffect(() => {
     let active = true;
@@ -773,7 +592,7 @@ export function WorkflowCenter({ activeTab, onTabChange, onOpenChat }: WorkflowC
     if (dimensionValues.some(Boolean) && !dimensionValues.every((value) => Number(value) > 0)) { setError("尺寸要么不填，要么完整填写长、宽、高。"); return; }
     setStarting(true); setError(undefined);
     try {
-      const result = await api.startProductPublishWorkflow({ sourceUrl: product.sourceUrl.trim(), publishPrice, currency: "THB", ...(dimensionValues.every(Boolean) ? { packageDimensions: { length: Number(product.length), width: Number(product.width), height: Number(product.height) } } : {}) });
+      const result = await api.startProductPublishWorkflow({ sourceUrl: product.sourceUrl.trim(), publishPrice, currency: "JPY", ...(dimensionValues.every(Boolean) ? { packageDimensions: { length: Number(product.length), width: Number(product.width), height: Number(product.height) } } : {}) });
       addRun(result.run); setProduct({ sourceUrl: "", price: "", length: "", width: "", height: "" });
     } catch (startError) { setError(startError instanceof Error ? startError.message : "任务创建失败。"); }
     finally { setStarting(false); }
@@ -781,7 +600,7 @@ export function WorkflowCenter({ activeTab, onTabChange, onOpenChat }: WorkflowC
   const startFlash = async () => {
     setStarting(true); setError(undefined);
     try {
-      const result = await api.startFlashSaleWorkflow({ productId: flash.productId.trim(), activityTitle: flash.title.trim() || `FlashSale-${flash.productId.slice(-6)}`, startAt: new Date(flash.startAt).toISOString(), endAt: new Date(flash.endAt).toISOString(), priceAmount: flash.price.trim(), currency: flash.currency, skuQuantityLimit: Number(flash.quantity), quantityPerUser: Number(flash.perUser) });
+      const result = await api.startFlashSaleWorkflow({ productId: flash.productId.trim(), activityTitle: flash.title.trim() || `FlashSale-${flash.productId.slice(-6)}`, startAt: new Date(flash.startAt).toISOString(), endAt: new Date(flash.endAt).toISOString(), priceAmount: flash.price.trim(), currency: flash.currency, pricingLevel: flash.level as "PRODUCT" | "VARIATION", skuQuantityLimit: Number(flash.quantity), quantityPerUser: Number(flash.perUser) });
       addRun(result.run);
     } catch (startError) { setError(startError instanceof Error ? startError.message : "秒杀任务创建失败。"); }
     finally { setStarting(false); }
@@ -884,8 +703,8 @@ export function WorkflowCenter({ activeTab, onTabChange, onOpenChat }: WorkflowC
       </div>
       {showLauncher && <section className="workflow-launcher">
         <div className="workflow-mode-tabs"><button className={mode === "product" ? "active" : ""} onClick={() => setMode("product")}><PackageCheck size={15} />供应商上架</button><button className={mode === "flash" ? "active" : ""} onClick={() => setMode("flash")}><Zap size={15} />秒杀活动</button></div>
-        {mode === "product" ? <><div><span className="eyebrow">供应商到店铺</span><h2>1688 商品发布到 TikTok</h2><p>按完整链路完成采集、认领、编辑保存、发布和结果回查。</p></div><div className="workflow-launch-form workflow-launch-form--grid"><input className="wide" aria-label="1688 商品链接" placeholder="1688 商品链接" value={product.sourceUrl} onChange={(event) => setProduct((value) => ({ ...value, sourceUrl: event.target.value }))} /><input aria-label="发布售价" inputMode="decimal" placeholder="发布售价（THB）" value={product.price} onChange={(event) => setProduct((value) => ({ ...value, price: event.target.value }))} /><input inputMode="decimal" placeholder="长 cm（可选）" value={product.length} onChange={(event) => setProduct((value) => ({ ...value, length: event.target.value }))} /><input inputMode="decimal" placeholder="宽 cm（可选）" value={product.width} onChange={(event) => setProduct((value) => ({ ...value, width: event.target.value }))} /><input inputMode="decimal" placeholder="高 cm（可选）" value={product.height} onChange={(event) => setProduct((value) => ({ ...value, height: event.target.value }))} /><button className="primary-button" disabled={starting} onClick={() => void startProduct()}>{starting ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}开始上架流程</button></div></>
-        : <><div><span className="eyebrow">促销活动</span><h2>创建 TikTok SKU 秒杀</h2><p>先核对商品、SKU 和库存，确认后创建活动并回查生效结果。</p></div><div className="workflow-launch-form workflow-launch-form--grid"><input aria-label="TikTok 商品 ID" placeholder="TikTok 商品 ID" value={flash.productId} onChange={(event) => setFlash((value) => ({ ...value, productId: event.target.value }))} /><input placeholder="活动名称（可选）" value={flash.title} onChange={(event) => setFlash((value) => ({ ...value, title: event.target.value }))} /><label><span>开始时间</span><input type="datetime-local" value={flash.startAt} onChange={(event) => setFlash((value) => ({ ...value, startAt: event.target.value }))} /></label><label><span>结束时间</span><input type="datetime-local" value={flash.endAt} onChange={(event) => setFlash((value) => ({ ...value, endAt: event.target.value }))} /></label><input inputMode="decimal" placeholder="秒杀价" value={flash.price} onChange={(event) => setFlash((value) => ({ ...value, price: event.target.value }))} /><select value={flash.currency} onChange={(event) => setFlash((value) => ({ ...value, currency: event.target.value }))}><option>THB</option><option>USD</option><option>VND</option><option>MYR</option><option>PHP</option><option>SGD</option><option>IDR</option></select><input inputMode="numeric" placeholder="每 SKU 活动库存" value={flash.quantity} onChange={(event) => setFlash((value) => ({ ...value, quantity: event.target.value }))} /><input inputMode="numeric" placeholder="每人限购" value={flash.perUser} onChange={(event) => setFlash((value) => ({ ...value, perUser: event.target.value }))} /><button className="primary-button" disabled={starting} onClick={() => void startFlash()}>{starting ? <LoaderCircle className="spin" size={16} /> : <Zap size={16} />}生成秒杀方案</button></div></>}
+        {mode === "product" ? <><div><span className="eyebrow">供应商到店铺</span><h2>1688 商品发布到 TikTok</h2><p>按完整链路完成采集、认领、编辑保存、发布和结果回查。</p></div><div className="workflow-launch-form workflow-launch-form--grid"><input className="wide" aria-label="1688 商品链接" placeholder="1688 商品链接" value={product.sourceUrl} onChange={(event) => setProduct((value) => ({ ...value, sourceUrl: event.target.value }))} /><input aria-label="发布售价" inputMode="decimal" placeholder="发布售价（JPY）" value={product.price} onChange={(event) => setProduct((value) => ({ ...value, price: event.target.value }))} /><input inputMode="decimal" placeholder="长 cm（可选）" value={product.length} onChange={(event) => setProduct((value) => ({ ...value, length: event.target.value }))} /><input inputMode="decimal" placeholder="宽 cm（可选）" value={product.width} onChange={(event) => setProduct((value) => ({ ...value, width: event.target.value }))} /><input inputMode="decimal" placeholder="高 cm（可选）" value={product.height} onChange={(event) => setProduct((value) => ({ ...value, height: event.target.value }))} /><button className="primary-button" disabled={starting} onClick={() => void startProduct()}>{starting ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}开始上架流程</button></div></>
+        : <><div><span className="eyebrow">促销活动</span><h2>创建 TikTok 秒杀活动</h2><p>先核对商品、SKU 和库存，确认后创建活动并回查生效结果。</p></div><div className="workflow-launch-form workflow-launch-form--grid"><input aria-label="TikTok 商品 ID" placeholder="TikTok 商品 ID" value={flash.productId} onChange={(event) => setFlash((value) => ({ ...value, productId: event.target.value }))} /><input placeholder="活动名称（可选）" value={flash.title} onChange={(event) => setFlash((value) => ({ ...value, title: event.target.value }))} /><label><span>开始时间</span><input type="datetime-local" value={flash.startAt} onChange={(event) => setFlash((value) => ({ ...value, startAt: event.target.value }))} /></label><label><span>结束时间</span><input type="datetime-local" value={flash.endAt} onChange={(event) => setFlash((value) => ({ ...value, endAt: event.target.value }))} /></label><input inputMode="decimal" placeholder="秒杀价" value={flash.price} onChange={(event) => setFlash((value) => ({ ...value, price: event.target.value }))} /><select value={flash.currency} onChange={(event) => setFlash((value) => ({ ...value, currency: event.target.value }))}><option>JPY</option><option>USD</option><option>CNY</option><option>VND</option><option>MYR</option><option>PHP</option><option>SGD</option><option>IDR</option></select><select aria-label="活动层级" value={flash.level} onChange={(event) => setFlash((value) => ({ ...value, level: event.target.value }))}><option value="PRODUCT">整品一个价</option><option value="VARIATION">按 SKU 定价</option></select><input inputMode="numeric" placeholder="活动库存" value={flash.quantity} onChange={(event) => setFlash((value) => ({ ...value, quantity: event.target.value }))} /><input inputMode="numeric" placeholder="每人限购" value={flash.perUser} onChange={(event) => setFlash((value) => ({ ...value, perUser: event.target.value }))} /><button className="primary-button" disabled={starting} onClick={() => void startFlash()}>{starting ? <LoaderCircle className="spin" size={16} /> : <Zap size={16} />}生成秒杀方案</button></div></>}
         {error && <div className="workflow-error"><AlertCircle size={15} /><span>{error}</span></div>}
       </section>}
       <div className="workflow-summary-band"><div><span>进行中</span><strong>{counts.active}</strong></div><div><span>等待处理</span><strong>{counts.attention}</strong></div><div><span>已完成</span><strong>{counts.completed}</strong></div></div>

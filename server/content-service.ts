@@ -47,7 +47,7 @@ async function saveRemoteAsset(input: CommonInput & { type: "image" | "video"; s
 }
 
 export async function createTextContent(input: CommonInput & { kind: "title" | "listing" | "script"; language?: string }): Promise<{ task: ContentTask; asset: ContentAsset }> {
-  const task = createTask("text", input, { kind: input.kind, language: input.language ?? "泰语" });
+  const task = createTask("text", input, { kind: input.kind, language: input.language ?? "日语" });
   try {
     const content = await generateContentText(input);
     const asset = contentStore.saveAsset({

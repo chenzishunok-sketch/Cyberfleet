@@ -18,7 +18,6 @@ export interface TmapiItemSceneResult {
 }
 
 const LANGUAGE_PATTERNS: Array<[RegExp, TmapiLanguage]> = [
-  [/(?:泰国|泰语|thai)/i, "th"],
   [/(?:越南|越南语|vietnamese)/i, "vi"],
   [/(?:俄罗斯|俄语|russian)/i, "ru"],
   [/(?:西班牙|西班牙语|spanish)/i, "es"],
@@ -100,7 +99,7 @@ export async function runTmapiItemScene(intent: TmapiItemIntent): Promise<TmapiI
 
   return {
     item,
-    content: `已读取真实 1688 货源数据：${title}。采购价 ${priceRange(item)} ${currency}，库存 ${stock}，近 90 天销量 ${sales90}，共 ${item.skus?.length ?? 0} 个 SKU。${noticeText}这里的运费不包含中国到泰国的跨境物流。`,
+    content: `已读取真实 1688 货源数据：${title}。采购价 ${priceRange(item)} ${currency}，库存 ${stock}，近 90 天销量 ${sales90}，共 ${item.skus?.length ?? 0} 个 SKU。${noticeText}这里的运费不包含中国到日本的跨境物流。`,
     artifact: {
       kind: "records",
       headline: title,

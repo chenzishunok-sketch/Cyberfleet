@@ -4,6 +4,37 @@
 所有显著的版本变更都会记录在本文件。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),
 版本号遵循 [语义化版本 SemVer](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 移除
+- 项目收缩为只经营日本市场，泰国相关能力全部下线
+  - 删除泰国定价引擎：`server/pricing-*.ts`（engine/rules/source/store/sync/1688/import/export/agent/export-worker）、`data/pricing/thailand-rules.json`、定价工作台 `PricingWorkspace.tsx` 与 7 个定价测试
+  - 删除 `/api/pricing*` 全部端点与 `/api/workflows/:id/pricing`
+  - 删除「商品管理」页面（原为 SKU 成本利润台账）、「定价 Agent」数字员工及两个定价工作流模板
+  - 选品 Agent 不再估算利润，改为给出采购价、起订量、销量、重量与到岸成本（采购价 + 国内运费）
+  - 站点/语言/币种/时区统一收敛到 `server/tiktok-sites.ts`，未知站点回落日本站与日语
+
+### 修复
+- 秒杀与上新流程的默认币种由 THB 改为 JPY，币种解析支持 JPY
+- 商品标题关键词提取支持日文假名（原来只按中文汉字切词，日文标题抽不出词）
+- 类目树展平修复：`isLastLevel` 是字符串 `"1"/"0"`，按布尔判断会把所有类目当成叶子
+- 视觉分析误判修复：只有文字结论、没有任何数据段时，不再生成 `visual_analysis` 空壳卡片
+  - 之前一句「总体来看…」的结论就能触发（置信度仅 0.2 就过阈值），产出「标题是一整句话、数据格 rows=0」的无图图表卡
+  - 现在要求至少含一个可可视化数据段（数据高亮 / 条形图 / 环形图）才生成；同时标题改为短小概括，去掉原始数字与货币符号
+- TMAPI 鉴权方式修复：token 改为走 `apikey` 请求头，而不是 query 参数 `apiToken`
+  - 之前 `tmapi-client.ts` 把 token 放在 query `?apiToken=...`，TMAPI 官方接口一律返回 401 `{"code":4013,"message":"unauthorized"}`，导致 App 报「TMAPI Token 无效或未配置」
+  - 实测 TMAPI 要求 `apikey` 头 + snake_case 参数（`item_id`）；`tmap_pricing.py` 一直是头鉴权所以没坏，只有 TS 客户端错了
+  - 修复后 `getTmapiItemDetailById` 真实返回商品数据（标题/采购价/SKU 全部正常）
+
+### 变更
+- 秒杀活动支持「整品一个价」与「按 SKU 定价」两种层级
+  - 新增 `pricingLevel: "PRODUCT" | "VARIATION"`；不传时按意图推断：给了 SKU 子集走 VARIATION，否则走 PRODUCT
+  - PRODUCT 级对应官方接口真机验证过的配方：`product_level=PRODUCT` + 挂商品时只传 `activity_price_amount`，**不带 `skus`**（带上会被平台判成结构错误）
+  - VARIATION 级保留原来逐 SKU 下发活动价的能力；整品级与 SKU 子集互斥，混用直接报错而不是静默忽略
+  - 回查判据分级：整品级先比对商品节点活动价，平台没返回该字段时退到逐 SKU 比对；两条路都拿不到数据就停在「待核验」并提示人工确认，不再假定已生效
+  - 审批前新增价格提示：秒杀价不低于某些 SKU 当前售价时给出警告（平台通常以「活动价未低于售价」拒收）
+  - 秒杀卡片显示活动层级，秒杀表单新增层级选择
+
 ## [0.5.0] - 2026-08-06
 
 ### 新增功能

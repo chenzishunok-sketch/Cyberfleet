@@ -16,7 +16,6 @@ function toSceneState(state: OfficeSnapshot["agents"][number]["state"]): AgentSt
 /** 点击数字员工时跳转到其对应工作台（无法映射的员工回到数字员工中心） */
 const AGENT_HOME_VIEW: Partial<Record<string, ViewId>> = {
   general: "chat",
-  pricing: "pricing",
   kol: "kol_chat",
   content: "content_create",
 };

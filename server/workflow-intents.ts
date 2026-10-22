@@ -1,42 +1,4 @@
 import type { FlashSaleWorkflowInput } from "./flash-sale-workflow.ts";
-import type { PricingDefaults, SkuPricingInput } from "../shared/contracts.ts";
-
-export function extractPricingUpdate(text: string): {
-  defaults: Partial<PricingDefaults>;
-  skuValues: Partial<SkuPricingInput>;
-} | undefined {
-  const numberAfter = (pattern: RegExp) => {
-    const value = text.match(pattern)?.[1];
-    return value === undefined ? undefined : Number(value);
-  };
-  const defaults: Partial<PricingDefaults> = {};
-  const skuValues: Partial<SkuPricingInput> = {};
-  const connector = "(?:改(?:为|成|到)?|调整?(?:为|成|到)?|设置?(?:为|成|到)?|为|是|:|：)?";
-  const domestic = numberAfter(new RegExp(`国内物流(?:费|成本)?\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)`, "i"));
-  const cloud = numberAfter(new RegExp(`云仓(?:费|成本)?\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)`, "i"));
-  const local = numberAfter(new RegExp(`(?:买家)?当地配送(?:费|成本)?\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)`, "i"));
-  const advertising = numberAfter(new RegExp(`广告(?:费|成本)?\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)`, "i"));
-  const creator = numberAfter(new RegExp(`达人佣金(?:比例|率)?\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)\\s*%?`, "i"));
-  const tax = numberAfter(new RegExp(`(?:税率|综合税率)\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)\\s*%?`, "i"));
-  const categoryCommission = numberAfter(new RegExp(`(?:平台|类目)佣金(?:比例|率)?\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)\\s*%?`, "i"));
-  const exchange = numberAfter(new RegExp(`(?:人民币兑泰铢|汇率)\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)`, "i"));
-  const sale = numberAfter(new RegExp(`(?:全部\\s*SKU\\s*)?(?:发布价|售价|定价)\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)`, "i"));
-  const purchase = numberAfter(new RegExp(`(?:全部\\s*SKU\\s*)?采购价\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)`, "i"));
-  const weight = numberAfter(new RegExp(`(?:全部\\s*SKU\\s*)?(?:重量|单件重量)\\s*${connector}\\s*(\\d+(?:\\.\\d+)?)`, "i"));
-  if (domestic !== undefined) defaults.domesticLogisticsCny = domestic;
-  if (cloud !== undefined) defaults.cloudWarehouseCny = cloud;
-  if (local !== undefined) defaults.buyerLocalDeliveryThb = local;
-  if (advertising !== undefined) defaults.advertisingThb = advertising;
-  if (creator !== undefined) defaults.creatorCommissionRate = creator / 100;
-  if (exchange !== undefined) defaults.exchangeRateCnyToThb = exchange;
-  if (sale !== undefined) skuValues.salePriceThb = sale;
-  if (purchase !== undefined) skuValues.purchasePriceCny = purchase;
-  if (weight !== undefined) skuValues.weightKg = weight;
-  if (tax !== undefined) skuValues.taxRate = tax / 100;
-  if (categoryCommission !== undefined) skuValues.categoryCommissionRate = categoryCommission / 100;
-  const confirmsDefaults = /(按(?:当前)?默认|确认(?:成本|利润|定价)|成本利润.*确认|利润数据.*确认)/i.test(text);
-  return Object.keys(defaults).length || Object.keys(skuValues).length || confirmsDefaults ? { defaults, skuValues } : undefined;
-}
 
 export function extractProductEditInput(text: string): {
   publishPrice: number;
@@ -72,7 +34,7 @@ export function extract1688WorkflowInput(text: string): {
   if (!sourceUrl || !/(发布|上架|铺货|搬到|一键|全流程|tiktok|\btk\b)/i.test(text)) return undefined;
   const productInput = extractProductEditInput(text);
   const shopId = text.match(/(?:店铺(?:\s*ID)?|shop\s*id)\s*(?:为|是|:|：)?\s*(\d+)/i)?.[1];
-  const currency = text.match(/\b(THB|USD|VND|MYR|PHP|SGD|IDR|GBP)\b/i)?.[1]?.toUpperCase();
+  const currency = text.match(/\b(JPY|USD|CNY|VND|MYR|PHP|SGD|IDR|GBP)\b/i)?.[1]?.toUpperCase();
   return {
     sourceUrl,
     ...(shopId ? { shopId } : {}),
@@ -97,7 +59,7 @@ export function parseFlashSaleIntent(text: string): { input?: FlashSaleWorkflowI
   const skuQuantity = text.match(/(?:活动库存|秒杀库存|每个\s*SKU\s*库存)\s*(?:为|是|:|：)?\s*(-?\d+)/i)?.[1];
   const perUser = text.match(/(?:每人限购|限购)\s*(?:为|是|:|：)?\s*(-?\d+)/i)?.[1];
   const times = absoluteTimes(text);
-  const currency = text.match(/\b(THB|USD|VND|MYR|PHP|SGD|IDR|GBP)\b/i)?.[1]?.toUpperCase();
+  const currency = text.match(/\b(JPY|USD|CNY|VND|MYR|PHP|SGD|IDR|GBP)\b/i)?.[1]?.toUpperCase();
   const title = text.match(/(?:活动名称|活动标题)\s*(?:为|是|:|：)\s*[“"]?([^\n，”"]{2,80})/i)?.[1]?.trim();
   const skuList = text.match(/(?:SKU\s*ID|SKU)\s*(?:为|是|:|：)?\s*([\d,，\s]+)/i)?.[1]
     ?.split(/[,，\s]+/).filter((value) => /^\d+$/.test(value));
@@ -116,7 +78,7 @@ export function parseFlashSaleIntent(text: string): { input?: FlashSaleWorkflowI
       startAt: times[0],
       endAt: times[1],
       priceAmount,
-      currency: currency || "THB",
+      currency: currency || "JPY",
       skuIds: skuList?.length ? skuList : undefined,
       skuQuantityLimit: Number(skuQuantity),
       quantityPerUser: Number(perUser),

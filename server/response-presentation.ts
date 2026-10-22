@@ -10,8 +10,12 @@ function cleanInlineMarkdown(value: string): string {
     .trim();
 }
 
-/** Convert LLM Markdown into concise plain text without damaging dates, SKUs or negative values. */
-export function cleanAssistantText(input: string): string {
+/**
+ * Convert LLM Markdown into concise plain text without damaging dates, SKUs or negative values.
+ * 空输入返回空串——需要「空就替代」的调用方自己给兜底文案。
+ * 之前它直接返回占位句，结果这个占位句被当成"用户问题"塞进了别的模板里。
+ */
+export function normalizeAssistantText(input: string): string {
   const source = input.replace(/\r\n?/g, "\n").replace(/```[^\n]*\n?/g, "");
   const output: string[] = [];
   let listIndex = 0;
@@ -70,7 +74,12 @@ export function cleanAssistantText(input: string): string {
   return output
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
-    .trim() || "这条请求没有生成可展示的内容，请换一种说法再试。";
+    .trim();
+}
+
+/** 对外展示用：空内容给一句可读的兜底，避免气泡空着。 */
+export function cleanAssistantText(input: string): string {
+  return normalizeAssistantText(input) || "这条请求没有生成可展示的内容，请换一种说法再试。";
 }
 
 // ─── 回答质量校验：过滤空泛/占位/答非所问的回答，并给出兜底
@@ -188,7 +197,7 @@ export function enrichPoorResponse(
     sceneLabel?: string;
   } = {},
 ): string {
-  const existing = cleanAssistantText(originalText);
+  const existing = normalizeAssistantText(originalText);
   const { artifactHint = "", recordCount = 0, sceneLabel = "" } = options;
   const hints: string[] = [];
 
@@ -207,17 +216,22 @@ export function enrichPoorResponse(
     hints.push("筛选建议：先按品类匹配（美妆找美妆达人，不要跨品类投），再看粉丝量级：5k-50k 的腰尾部/KOC 性价比通常最高，大主播适合品牌曝光不适合利润款。");
     hints.push("下一步建议：① 挑出粉丝画像与价格带最匹配的 3-5 位达人；② 先发样品+脚本，让达人出 1 条挂车短视频测数据；③ 数据好的再谈专场或长期佣金合作。");
   } else {
-    // 通用兜底
-    hints.push("重点结论：排名靠前即为当前时间窗表现最强的记录，建议优先研究 Top 3 的共性特征（标题结构、价格带、店铺类型、评分）。");
-    hints.push("下一步建议：① 用店铺自有数据与榜单对比，找自己目前缺位的价格带或品类方向；② 选 2-3 个差异点先做小范围测试，不要一次性全量投入。");
+    // 通用兜底：不知道用户在问什么场景，就不要假设成榜单/选品。
+    // 以前这里直接给"排名靠前即表现最强""对标 TOP10"这类话术，
+    // 结果"查待发货订单"也被答成选品分析，属于答非所问。
+    if (recordCount) hints.push(`本次从官方接口取回 ${recordCount} 条记录，完整字段见下方表格。`);
+    if (sceneLabel) hints.push(`本次查询对象：${sceneLabel}。`);
+    hints.push("我没有足够信息替你下结论。如果表格里已有你要的字段，可以直接按列核对；如果需要进一步分析，请告诉我关注哪个维度（时间、商品、状态或金额）。");
   }
 
   const sceneText = sceneLabel ? `（${sceneLabel}）` : "";
   const head = existing && !PLACEHOLDER_PATTERNS.some(({ pattern }) => pattern.test(existing.trim()))
     ? existing + "\n\n"
     : "";
-  const footer = artifactHint ? `\n\n注：${artifactHint}。` : "";
-  return `${head}关于你问的「${cleanAssistantText(userQuestion) || "当前查询"}」${sceneText}，补充要点如下：
+  // artifactHint 自带句号时不要再补一个，否则会出现「共 1 条记录。。」
+  const hintText = artifactHint.trim().replace(/[。．.]+$/, "");
+  const footer = hintText ? `\n\n注：${hintText}。` : "";
+  return `${head}关于你问的「${normalizeAssistantText(userQuestion).replace(/\s+/g, " ").slice(0, 60) || "当前查询"}」${sceneText}，补充要点如下：
 ${hints.map((h, i) => `${i + 1}. ${h}`).join("\n")}${footer}`.trim();
 }
 
