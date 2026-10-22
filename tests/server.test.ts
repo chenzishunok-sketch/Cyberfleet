@@ -72,6 +72,7 @@ describe("ShopPilot API", () => {
       ok: true,
       mode: "demo",
       connections: { llm: false, tiktok: false, miaoshou: false, tmapi: false, feishu: false, kolBridge: false },
+      auth: { enabled: false },
       tiktok: { status: "not_configured", connected: false },
       llm: { connected: false, source: "missing" },
       miaoshou: { connected: false },

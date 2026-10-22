@@ -449,6 +449,9 @@ function message(content: string, artifact?: MessageArtifact, steps?: RunStep[],
  * 这里也会用 userQuestion 重新判断，绝对不能把"我可以查询经营数据"这类无价值话术发给用户。
  */
 function finalQualityGate(msg: ChatMessage, userQuestion: string): ChatMessage {
+  // 真实模式下不改写模型输出：质量门会按模板重写内容，那等于用固定文案冒充模型回答。
+  // 模型答得不好就照实显示，便于发现真正的问题；演示模式仍保留这道门。
+  if (process.env.DEMO_MODE !== "true") return msg;
   if (!userQuestion?.trim()) return msg;
   const quality = judgeResponseQuality(msg.content, userQuestion);
   if (quality.quality !== "poor") return msg;
@@ -1961,11 +1964,16 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
         if (followUps.length) responseMessage.followUps = followUps;
       }
     } catch (error) {
-      console.warn("ReAct loop failed; using deterministic fallback", error);
-      responseMessage = await fallbackDecision(request, agentContext);
+      // 真实模式下不允许伪造回答：模型调用失败必须原样暴露给用户。
+      // 以前的实现会静默降级到确定性兜底，界面看着有回答，其实不是模型输出的。
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error("LLM 对话失败（真实模式，不再降级）:", reason);
+      throw new Error(`大模型调用失败：${reason}`);
     }
   } else {
-    // ── 确定性路由（演示模式或 LLM 不可用） ──
+    // 演示模式，或真实模式下尚未配置大模型。
+    // 这里走的是「关键词规则选工具 + 真实数据渲染」：数据仍然取自真实平台，
+    // 只有"选哪个查询"是规则决定的，不构成编造，因此保留这条降级路径。
     responseMessage = await fallbackDecision(request, agentContext);
   }
 

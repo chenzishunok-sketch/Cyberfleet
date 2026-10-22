@@ -1,7 +1,7 @@
 import { createLarkChannel, Domain, LoggerLevel, type LarkChannel, type NormalizedMessage } from "@larksuiteoapi/node-sdk";
-import { dashboard } from "./data.ts";
 import { getFeishuRuntimeConfig } from "./runtime-config.ts";
 import { handleChat } from "./orchestrator.ts";
+import { getCurrentDashboard } from "./tiktok-data.ts";
 
 export interface FeishuBridgeStatus {
   configured: boolean;
@@ -21,9 +21,11 @@ function credentials() {
 async function replyToMessage(message: NormalizedMessage): Promise<void> {
   if (!channel || !message.content.trim()) return;
   try {
+    // 店铺 ID 取当前数据源，避免把演示数据里的假店铺 ID 带进真实会话
+    const current = await getCurrentDashboard();
     const result = await handleChat({
       message: message.content.trim(),
-      storeId: dashboard.store.id,
+      storeId: current.store.id,
       mode: "analysis",
     });
     await channel.send(message.chatId, { markdown: result.message.content }, { replyTo: message.messageId });

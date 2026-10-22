@@ -5,7 +5,6 @@ import { z } from "zod";
 import { installAuthGate, isAuthEnabled } from "./auth-gate.ts";
 import type { ChatRequest, MessageArtifact, SkuPricingRecord } from "../shared/contracts.ts";
 import { AGENT_CONTEXTS, type AgentContext } from "../shared/digital-employees.ts";
-import { dashboard } from "./data.ts";
 import { approveAction, handleChat, rejectAction } from "./orchestrator.ts";
 import { agentRegistry } from "./agent-registry.ts";
 import { getCollaborationOverview, agentBus } from "./agent-bus.ts";
@@ -1436,8 +1435,11 @@ export function createApp() {
     }
   });
 
-  app.post("/api/automations/:id/toggle", (request, response) => {
-    const automation = dashboard.automations.find((item) => item.id === request.params.id);
+  app.post("/api/automations/:id/toggle", async (request, response) => {
+    // 读当前数据源（真实模式为 TikTok 实时数据，演示模式为内置演示数据），
+    // 不再固定使用演示数据里的自动任务，避免真实模式下操作到假对象。
+    const current = await getCurrentDashboard();
+    const automation = current.automations.find((item) => item.id === request.params.id);
     if (!automation) {
       response.status(404).json({ error: "未找到该自动任务。" });
       return;
