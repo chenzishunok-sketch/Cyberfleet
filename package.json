@@ -9,6 +9,7 @@
     "dev:0220": "WEB_PORT=5220 API_PORT=8220 PORT=8220 KOL_BRIDGE_PORT=8221 FRONTEND_URL=http://localhost:5220 ALLOWED_FRONTEND_ORIGINS=http://localhost:5220,http://127.0.0.1:5220 concurrently --restart-tries -1 --restart-after 1000 -n web,api -c cyan,magenta \"vite --host 127.0.0.1 --port 5220\" \"tsx watch server/index.ts\"",
     "kill:0220": "lsof -ti:5220,8220,8221 | xargs -r kill -9 2>/dev/null; sleep 1; echo '已清场 0220 实例 (5220/8220/8221)'",
     "ports": "for p in 5182 8795 8796; do pid=$(lsof -i :$p -sTCP:LISTEN -t 2>/dev/null | tr '\\n' ' '); echo \"端口 $p → ${pid:-空闲}\"; done",
+    "check:conn": "node scripts/check-connections.mjs",
     "build": "tsc -b && vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
     "start:cloud": "npm run build && DEMO_MODE=true NODE_ENV=production HOST=0.0.0.0 tsx server/index.ts",
