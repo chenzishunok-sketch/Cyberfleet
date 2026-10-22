@@ -360,6 +360,9 @@ interface LlmCallOptions {
   onToken?: (delta: string) => void;
   // 强制模型以 JSON 对象返回（OpenAI response_format）
   responseFormat?: "json";
+  // DeepSeek v4 思考开关：显式 "disabled" 用于简单结构化生成任务——
+  // 思考会挤占 max_tokens 预算，把正文截成空/半截（finish_reason=length）
+  thinking?: "disabled";
 }
 
 export function fastModel(): string | undefined {
@@ -403,7 +406,7 @@ export async function callLlmRaw(options: LlmCallOptions): Promise<{
   // "Thinking mode does not support this tool_choice"）。本应用的意图路由与 ReAct
   // 循环依赖 tool_choice 强制工具调用，所以这些请求显式关闭思考；未指定 tool_choice
   // 的纯生成请求保留默认思考，兼顾回答质量与成本。
-  if (options.toolChoice && /api\.deepseek\.com/i.test(baseUrl)) {
+  if (/api\.deepseek\.com/i.test(baseUrl) && (options.toolChoice || options.thinking === "disabled")) {
     body.thinking = { type: "disabled" };
   }
 
@@ -570,6 +573,7 @@ export async function summarizeWebResearch(question: string, research: WebSearch
     systemPrompt: `你是跨境电商研究助手。只能使用给定的检索结果回答，不得编造费率、日期或政策。优先采信平台官方或一手来源；第三方内容只能作参考。先给结论，再简要区分“可核实事实”“分析判断”和“待确认信息”。最后列出实际使用的来源标题和完整网址。总长度控制在 600 个中文字以内，不要使用 Markdown 链接。`,
     model: fastModel(),
     maxTokens: 700,
+    thinking: "disabled",
   });
   const content = result.content?.trim();
   if (!content) throw new Error("模型没有返回联网分析。");
@@ -601,6 +605,7 @@ export async function summarizeLiveShopData(input: {
 - 全文 120~260 个汉字`,
     model: fastModel(),
     maxTokens: 700,
+    thinking: "disabled",
   });
   const content = result.content?.trim();
   if (!content) throw new Error("模型没有返回经营解读。");

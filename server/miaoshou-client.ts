@@ -544,7 +544,10 @@ export async function miaoshouAiGenerateProductInfo(itemId: string, shopId: numb
         systemPrompt,
         messages: [{ role: "user", content: userContent }],
         model: modelName,
-        maxTokens: 500,
+        maxTokens: 800,
+        // DeepSeek v4 思考模式会把 max_tokens 预算烧在推理上，正文被截空/半截；
+        // 这是简单结构化生成，显式关思考（实测关思考后 500 token 内稳定完整返回）
+        thinking: "disabled",
       });
       if (result.content) break; // 成功则跳出
     } catch (error) {

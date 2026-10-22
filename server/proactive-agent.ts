@@ -241,6 +241,7 @@ async function generateInsightWithLlm(
       model: fastModel(),
       maxTokens: 300,
       responseFormat: "json",
+      thinking: "disabled",
     });
 
     if (result.content) {
