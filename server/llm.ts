@@ -398,6 +398,14 @@ export async function callLlmRaw(options: LlmCallOptions): Promise<{
   if (options.stream) body.stream = true;
   if (options.responseFormat === "json") body.response_format = { type: "json_object" };
 
+  // DeepSeek v4 默认开启思考模式，而思考模式不支持 tool_choice（服务端直接 400：
+  // "Thinking mode does not support this tool_choice"）。本应用的意图路由与 ReAct
+  // 循环依赖 tool_choice 强制工具调用，所以这些请求显式关闭思考；未指定 tool_choice
+  // 的纯生成请求保留默认思考，兼顾回答质量与成本。
+  if (options.toolChoice && /api\.deepseek\.com/i.test(baseUrl)) {
+    body.thinking = { type: "disabled" };
+  }
+
   // 503/429 重试：最多 3 次，指数退避
   const maxRetries = 3;
   let lastError: Error | undefined;
