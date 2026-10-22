@@ -52,34 +52,37 @@ function extract1688Url(text: string): string | undefined {
   return match?.[0];
 }
 
-/** 推断妙手场景查询 */
+/** 推断采集上架场景查询 */
 export function inferMiaoshouSceneQuery(text: string): MiaoshouSceneQuery | undefined {
   // 采集相关（有 URL 直接采集，无 URL 也匹配以便提示用户）
   if (/(采集|抓取|爬取|拉取).*(1688|货源|链接)|1688.*采集|货源.*采集/i.test(text)) {
     return "collect_item";
   }
+  // 发布意图先行判断：消息里同时出现「认领」和「发布到店铺/tiktok」时，认领只是修饰语，
+  // 真实意图是发布（如「把 TikTok 采集箱里最近认领的商品发布到店铺」）。
+  const publishIntentText = /(发布|上架|铺货).*(tk|tiktok|店铺)|上架.*(tk|tiktok)/i.test(text);
   // 认领相关（采集后认领到平台采集箱）
-  if (/(认领|claim|搬品|搬到|转到|导入到).*(tk|tiktok|平台|采集箱|店铺)|认领/i.test(text)) return "claim_to_platform";
+  if (!publishIntentText && /(认领|claim|搬品|搬到|转到|导入到).*(tk|tiktok|平台|采集箱|店铺)|认领/i.test(text)) return "claim_to_platform";
   // TK 采集箱（优先于公共采集箱匹配）
   if (/(tk|tiktok).*(采集箱|采集)/i.test(text) && /(查看|查询|列表)/i.test(text)) return "tiktok_collect_box";
   if (/(采集箱|公共采集|collect box)/i.test(text) && /(查看|查询|列表|有哪些|多少)/i.test(text)) return "common_collect_box";
-  if (/((类目|分类|category).*(查看|查询|列表|有哪些)|(查看|查询|列表|有哪些).*(类目|分类|category))/i.test(text) && /(妙手|采集|tk|tiktok)/i.test(text)) return "tiktok_categories";
+  if (/((类目|分类|category).*(查看|查询|列表|有哪些)|(查看|查询|列表|有哪些).*(类目|分类|category))/i.test(text) && /(采集上架|采集|tk|tiktok)/i.test(text)) return "tiktok_categories";
   if (/(补充信息|补充资料|完善信息|完善商品|匹配类目|匹配属性|生成标题|生成描述|翻译商品|商品翻译)|(?:ai匹配|智能匹配|自动匹配).*(?:类目|分类|属性|信息)/i.test(text)) return "supplement_info";
 
-  // 发布相关
-  if (/(发布|上架|铺货).*(tk|tiktok|店铺)|上架.*(tk|tiktok)/i.test(text)) {
+  // 发布相关（publishIntentText 已在上面算过，避免与认领判断口径不一致）
+  if (publishIntentText) {
     if (/(记录|状态|结果|进度)/i.test(text)) return "publish_records";
     return "publish_to_tiktok";
   }
   if (/(发布记录|上架记录|铺货记录|发布状态)/i.test(text)) return "publish_records";
   if (/(定价模板|价格模板|pricing template)/i.test(text)) return "price_templates";
 
-  // 妙手店铺
-  if (/(妙手.*店铺|店铺.*妙手|授权.*妙手|妙手.*授权)/i.test(text)) return "miaoshou_shops";
+  // 采集上架店铺
+  if (/((?:采集上架|妙手).*店铺|店铺.*(?:采集上架|妙手)|授权.*(?:采集上架|妙手)|(?:采集上架|妙手).*授权)/i.test(text)) return "miaoshou_shops";
 
-  // 库存、包裹和售后在 TikTok 与妙手都有同名能力。只有明确指定妙手/ERP 时才走妙手，
-  // 避免普通的“查看店铺库存/退款”被错误分配到供应链侧。
-  const explicitErpContext = /(妙手|erp)/i.test(text);
+  // 库存、包裹和售后在 TikTok 与采集上架都有同名能力。只有明确指定采集上架/ERP 时才走采集上架，
+  // 避免普通的"查看店铺库存/退款"被错误分配到供应链侧。
+  const explicitErpContext = /(采集上架|妙手|erp)/i.test(text);
   if (explicitErpContext && /(包裹|运单|package)/i.test(text) && /(查看|查询|列表)/i.test(text)) return "miaoshou_packages";
   if (explicitErpContext && /(退货|退款|售后|return)/i.test(text) && /(查看|查询|列表)/i.test(text)) return "miaoshou_returns";
   if (/(采购单|采购|补货|进货|1688.*采购)/i.test(text) && /(查看|查询|列表)/i.test(text)) return "miaoshou_purchase_orders";
@@ -252,7 +255,7 @@ interface FlatCategory {
 
 /**
  * 递归展平 `cateTree`。
- * 妙手返回的是嵌套 children（对象 map），且 `isLastLevel` 是字符串 "1"/"0"——
+ * 采集上架返回的是嵌套 children（对象 map），且 `isLastLevel` 是字符串 "1"/"0"——
  * 直接当布尔用会让所有类目都变成叶子（"0" 在 JS 里是真值）。
  */
 function flattenCategoryTree(tree: Record<string, unknown>): FlatCategory[] {
@@ -313,7 +316,7 @@ async function supplementInfoFlow(
         headline: "补充信息",
         records: [],
         columns: [{ key: "info", label: "说明" }],
-        source: `妙手开放平台 · ${now}`,
+        source: `采集上架服务 · ${now}`,
         emptyLabel: "请先采集并认领商品到 TikTok 采集箱。",
       }),
     };
@@ -355,7 +358,7 @@ async function supplementInfoFlow(
 
   const numericShopId = Number(shopIds[0]);
   if (!Number.isFinite(numericShopId) || numericShopId <= 0) {
-    pushRow("商品翻译 / AI 生成", "跳过", "未找到妙手店铺编号，请先授权店铺");
+    pushRow("商品翻译 / AI 生成", "跳过", "未找到采集上架店铺编号，请先授权店铺");
   } else {
   try {
     const tr = await miaoshouTranslateItem(itemId, numericShopId, lang);
@@ -377,7 +380,7 @@ async function supplementInfoFlow(
   }
 
   const summary = permBlocked
-    ? "部分接口在妙手开放平台未授权（应用无权限）。请到 妙手 ERP → 开放平台 → 应用管理 → 接口权限，勾选：AI 类目匹配、AI 属性匹配、商品翻译、AI 生成商品信息，保存后重试。"
+    ? "部分接口在采集上架服务未授权（应用无权限）。请到 采集上架服务 → 开放平台 → 应用管理 → 接口权限，勾选：AI 类目匹配、AI 属性匹配、商品翻译、AI 生成商品信息，保存后重试。"
     : `已对商品 ${itemId} 执行补充信息（类目 / 属性 / 翻译 / 标题描述）。`;
 
   return {
@@ -390,13 +393,13 @@ async function supplementInfoFlow(
         { key: "status", label: "状态" },
         { key: "detail", label: "详情" },
       ],
-      source: `妙手开放平台 · AI 补充信息 · ${now}`,
+      source: `采集上架服务 · AI 补充信息 · ${now}`,
       emptyLabel: "未执行任何补充信息步骤。",
     }),
   };
 }
 
-/** 执行妙手场景查询 */
+/** 执行采集上架场景查询 */
 export async function runMiaoshouSceneQuery(
   query: MiaoshouSceneQuery,
   originalText: string,
@@ -404,12 +407,12 @@ export async function runMiaoshouSceneQuery(
 ): Promise<MiaoshouSceneResult> {
   if (!hasMiaoshouConfiguration()) {
     return {
-      content: "妙手 API 尚未配置，无法执行此操作。",
+      content: "采集上架服务 尚未配置，无法执行此操作。",
       artifact: recordsArtifact({
-        headline: "妙手 API 未配置",
+        headline: "采集上架服务 未配置",
         records: [],
         columns: [{ key: "info", label: "信息" }],
-        source: "妙手开放平台",
+        source: "采集上架服务",
         emptyLabel: "请先在 .env 中配置 MIAOSHOU_APP_KEY 和 MIAOSHOU_APP_SECRET。",
       }),
     };
@@ -427,7 +430,7 @@ export async function runMiaoshouSceneQuery(
             headline: "采集货源",
             records: [],
             columns: [{ key: "info", label: "说明" }],
-            source: "妙手开放平台",
+            source: "采集上架服务",
             emptyLabel: "请在指令中粘贴 1688 商品链接。",
           }),
         };
@@ -474,7 +477,7 @@ export async function runMiaoshouSceneQuery(
             { key: "source_url", label: "来源链接" },
             { key: "status", label: "状态" },
           ],
-          source: `妙手开放平台 · fetch_item · ${now}`,
+          source: `采集上架服务 · fetch_item · ${now}`,
           emptyLabel: "采集请求已提交，结果可能需要一些时间处理。",
         }),
       };
@@ -486,7 +489,7 @@ export async function runMiaoshouSceneQuery(
       // API 返回字段为 detailList（参考 Python collectbox_crud.py）
       const list = data?.detailList ?? data?.list ?? [];
       return {
-        content: `已读取妙手公共采集箱，共 ${data?.total ?? list.length} 个商品。`,
+        content: `已读取采集上架公共采集箱，共 ${data?.total ?? list.length} 个商品。`,
         artifact: recordsArtifact({
           headline: "公共采集箱",
           records: list,
@@ -497,7 +500,7 @@ export async function runMiaoshouSceneQuery(
             { key: "status", label: "状态" },
             { key: "gmtCreate", label: "采集时间" },
           ],
-          source: `妙手开放平台 · get_common_collect_box_list · ${now}`,
+          source: `采集上架服务 · get_common_collect_box_list · ${now}`,
           emptyLabel: "采集箱为空，请先采集 1688 商品链接。",
         }),
       };
@@ -523,7 +526,7 @@ export async function runMiaoshouSceneQuery(
             { key: "status", label: "状态" },
             { key: "create_time", label: "创建时间" },
           ],
-          source: `妙手开放平台 · search_collect_box_detail_list · ${now}`,
+          source: `采集上架服务 · search_collect_box_detail_list · ${now}`,
           emptyLabel: "TikTok 采集箱为空，请先从公共采集箱认领商品。",
         }),
       };
@@ -534,13 +537,13 @@ export async function runMiaoshouSceneQuery(
       const site = await miaoshouResolveSite();
       if (!site) {
         return {
-          content: "没有从妙手读到已授权的 TikTok 店铺，无法确定该用哪个站点的类目树。请先在妙手后台完成店铺授权。",
+          content: "没有从采集上架读到已授权的 TikTok 店铺，无法确定该用哪个站点的类目树。请先在采集上架后台完成店铺授权。",
           artifact: recordsArtifact({
             headline: "TikTok 类目列表",
             records: [],
             columns: [{ key: "info", label: "说明" }],
-            source: `妙手开放平台 · ${now}`,
-            emptyLabel: "妙手账号下没有可用的 TikTok 店铺。",
+            source: `采集上架服务 · ${now}`,
+            emptyLabel: "采集上架账号下没有可用的 TikTok 店铺。",
           }),
         };
       }
@@ -568,7 +571,7 @@ export async function runMiaoshouSceneQuery(
             { key: "path", label: "类目路径" },
             { key: "isLeaf", label: "末级" },
           ],
-          source: `妙手开放平台 · get_category_tree_by_site(${site}) · ${now}`,
+          source: `采集上架服务 · get_category_tree_by_site(${site}) · ${now}`,
           emptyLabel: "未返回类目数据。",
         }),
       };
@@ -627,7 +630,7 @@ export async function runMiaoshouSceneQuery(
                     { key: "source_platform", label: "货源平台" },
                     { key: "price", label: "价格" },
                   ],
-                  source: `妙手开放平台 · 等待认领指令 · ${now}`,
+                  source: `采集上架服务 · 等待认领指令 · ${now}`,
                   emptyLabel: "公共采集箱为空，请先采集 1688 链接。",
                 }),
               };
@@ -645,7 +648,7 @@ export async function runMiaoshouSceneQuery(
             headline: "认领商品到平台采集箱",
             records: [],
             columns: [{ key: "info", label: "说明" }],
-            source: "妙手开放平台",
+            source: "采集上架服务",
             emptyLabel: "请提供要认领的商品 detail ID，例如：认领 12345 到 TikTok。",
           }),
         };
@@ -713,7 +716,7 @@ export async function runMiaoshouSceneQuery(
               { key: "platform", label: "目标平台" },
               { key: "status", label: "状态" },
             ],
-            source: `妙手开放平台 · claimed · ${now}`,
+            source: `采集上架服务 · claimed · ${now}`,
             emptyLabel: "认领请求已提交，但未返回映射结果。",
           }),
         };
@@ -730,7 +733,7 @@ export async function runMiaoshouSceneQuery(
               { key: "detail_ids", label: "商品 ID" },
               { key: "error", label: "错误信息" },
             ],
-            source: `妙手开放平台 · claimed · ${now}`,
+            source: `采集上架服务 · claimed · ${now}`,
           }),
         };
       }
@@ -743,13 +746,13 @@ export async function runMiaoshouSceneQuery(
       const list = data?.shopList ?? [];
       if (!list.length) {
         return {
-          content: "妙手账号下还没有授权任何 TikTok 店铺，所以采集、认领、发布这些操作暂时都做不了。请先到妙手后台完成店铺授权，再回来查询。",
+          content: "采集上架账号下还没有授权任何 TikTok 店铺，所以采集、认领、发布这些操作暂时都做不了。请先到采集上架后台完成店铺授权，再回来查询。",
           artifact: recordsArtifact({
-            headline: "妙手授权店铺",
+            headline: "采集上架授权店铺",
             records: [],
             columns: [{ key: "info", label: "说明" }],
-            source: `妙手开放平台 · get_shop_list · ${now}`,
-            emptyLabel: "妙手尚未授权任何店铺。",
+            source: `采集上架服务 · get_shop_list · ${now}`,
+            emptyLabel: "采集上架尚未授权任何店铺。",
           }),
         };
       }
@@ -762,20 +765,20 @@ export async function runMiaoshouSceneQuery(
         .filter(Boolean);
       const abnormal = list.filter((shop) => String(shop.status ?? "normal").toLowerCase() !== "normal");
       const statusNote = abnormal.length
-        ? `其中 ${abnormal.length} 个店铺状态异常（${abnormal.map((s) => String(s.status ?? "")).join("、")}），需要去妙手后台确认授权。`
+        ? `其中 ${abnormal.length} 个店铺状态异常（${abnormal.map((s) => String(s.status ?? "")).join("、")}），需要去采集上架后台确认授权。`
         : "授权状态全部正常。";
       const detail = list
         .map((shop) => {
           const id = String(shop.shopId ?? "");
           const status = String(shop.status ?? "normal");
           const expire = String(shop.gmtExpire ?? "");
-          return `店铺编号 ${id}，状态 ${status}${expire ? `，妙手侧授权到期 ${expire}` : ""}`;
+          return `店铺编号 ${id}，状态 ${status}${expire ? `，采集上架侧授权到期 ${expire}` : ""}`;
         })
         .join("；");
       return {
-        content: `妙手账号下已授权 ${list.length} 个 TikTok 店铺：${names.join("、")}。${detail}。${statusNote}采集、认领、发布都会落到这个店铺。`,
+        content: `采集上架账号下已授权 ${list.length} 个 TikTok 店铺：${names.join("、")}。${detail}。${statusNote}采集、认领、发布都会落到这个店铺。`,
         artifact: recordsArtifact({
-          headline: "妙手授权店铺",
+          headline: "采集上架授权店铺",
           records: list,
           columns: [
             { key: "shopId", label: "店铺 ID" },
@@ -785,8 +788,8 @@ export async function runMiaoshouSceneQuery(
             { key: "status", label: "状态" },
             { key: "gmtExpire", label: "过期时间" },
           ],
-          source: `妙手开放平台 · get_shop_list · ${now}`,
-          emptyLabel: "妙手尚未授权任何店铺。",
+          source: `采集上架服务 · get_shop_list · ${now}`,
+          emptyLabel: "采集上架尚未授权任何店铺。",
         }),
       };
     }
@@ -843,7 +846,7 @@ export async function runMiaoshouSceneQuery(
               headline: "发布到 TikTok",
               records: [{ collectBox_error: boxError, shop_error: shopError }],
               columns: [{ key: "collectBox_error", label: "采集箱错误" }, { key: "shop_error", label: "店铺错误" }],
-              source: "妙手开放平台",
+              source: "采集上架服务",
               emptyLabel: "请提供商品 detail ID 和店铺 ID。",
             }),
           };
@@ -888,7 +891,7 @@ export async function runMiaoshouSceneQuery(
                 { key: "name", label: "名称" },
                 { key: "status", label: "状态/站点" },
               ],
-              source: `妙手开放平台 · ${now}`,
+              source: `采集上架服务 · ${now}`,
               emptyLabel: boxList.length === 0 && shopList.length === 0
                 ? "采集箱和店铺列表均为空。请先采集商品并授权店铺。"
                 : boxList.length === 0
@@ -913,7 +916,7 @@ export async function runMiaoshouSceneQuery(
               headline: "认领到店铺失败",
               records: detailIds.map((id) => ({ detail_id: String(id), status: "认领失败" })),
               columns: [{ key: "detail_id", label: "商品 ID" }, { key: "status", label: "状态" }],
-              source: `妙手开放平台 · ${now}`,
+              source: `采集上架服务 · ${now}`,
               emptyLabel: "认领失败。",
             }),
           };
@@ -940,7 +943,7 @@ export async function runMiaoshouSceneQuery(
               { key: "shop_ids", label: "店铺 ID" },
               { key: "status", label: "状态" },
             ],
-            source: `妙手开放平台 · publish · ${now}`,
+            source: `采集上架服务 · publish · ${now}`,
             emptyLabel: "发布请求已提交。",
           }),
         };
@@ -955,7 +958,7 @@ export async function runMiaoshouSceneQuery(
             headline: "发布失败",
             records: [],
             columns: [{ key: "info", label: "说明" }],
-            source: "妙手开放平台",
+            source: "采集上架服务",
             emptyLabel: `错误：${msg}`,
           }),
         };
@@ -974,12 +977,12 @@ export async function runMiaoshouSceneQuery(
         const msg = error instanceof Error ? error.message : "";
         if (msg.includes("无权限")) {
           return {
-            content: "发布记录功能需要在妙手开放平台后台申请对应接口权限。请在妙手 ERP → 开放平台 → 应用管理中勾选「采集箱搬品记录」接口权限。",
+            content: "发布记录功能需要在采集上架服务后台申请对应接口权限。请在采集上架服务 → 开放平台 → 应用管理中勾选「采集箱搬品记录」接口权限。",
             artifact: recordsArtifact({
               headline: "TikTok 发布记录",
               records: [],
               columns: [{ key: "info", label: "说明" }],
-              source: "妙手开放平台",
+              source: "采集上架服务",
               emptyLabel: "接口权限未开通。",
             }),
           };
@@ -998,7 +1001,7 @@ export async function runMiaoshouSceneQuery(
             { key: "status", label: "状态" },
             { key: "create_time", label: "创建时间" },
           ],
-          source: `妙手开放平台 · search_move_collect_list · ${now}`,
+          source: `采集上架服务 · search_move_collect_list · ${now}`,
           emptyLabel: "暂无发布记录。",
         }),
       };
@@ -1014,12 +1017,12 @@ export async function runMiaoshouSceneQuery(
         const msg = error instanceof Error ? error.message : "";
         if (msg.includes("无权限")) {
           return {
-            content: "定价模板功能需要在妙手开放平台后台申请对应接口权限。请在妙手 ERP → 开放平台 → 应用管理中勾选「定价模板」接口权限。",
+            content: "定价模板功能需要在采集上架服务后台申请对应接口权限。请在采集上架服务 → 开放平台 → 应用管理中勾选「定价模板」接口权限。",
             artifact: recordsArtifact({
               headline: "TikTok 定价模板",
               records: [],
               columns: [{ key: "info", label: "说明" }],
-              source: "妙手开放平台",
+              source: "采集上架服务",
               emptyLabel: "接口权限未开通。",
             }),
           };
@@ -1037,7 +1040,7 @@ export async function runMiaoshouSceneQuery(
             { key: "site", label: "站点" },
             { key: "is_default", label: "默认" },
           ],
-          source: `妙手开放平台 · get_price_template_list · ${now}`,
+          source: `采集上架服务 · get_price_template_list · ${now}`,
           emptyLabel: "暂无定价模板。",
         }),
       };
@@ -1048,9 +1051,9 @@ export async function runMiaoshouSceneQuery(
       const data = result.data as { orderPackageList?: Array<Record<string, unknown>>; total?: number } | undefined;
       const list = data?.orderPackageList ?? [];
       return {
-        content: `已读取妙手包裹列表，共 ${data?.total ?? list.length} 个。`,
+        content: `已读取采集上架包裹列表，共 ${data?.total ?? list.length} 个。`,
         artifact: recordsArtifact({
-          headline: "妙手包裹",
+          headline: "采集上架包裹",
           records: list,
           columns: [
             { key: "package_id", label: "包裹 ID" },
@@ -1059,7 +1062,7 @@ export async function runMiaoshouSceneQuery(
             { key: "status", label: "状态" },
             { key: "create_time", label: "创建时间" },
           ],
-          source: `妙手开放平台 · search_package_list · ${now}`,
+          source: `采集上架服务 · search_package_list · ${now}`,
           emptyLabel: "暂无包裹。",
         }),
       };
@@ -1077,12 +1080,12 @@ export async function runMiaoshouSceneQuery(
         const msg = error instanceof Error ? error.message : "";
         if (msg.includes("无权限")) {
           return {
-            content: "退货退款功能需要在妙手开放平台后台申请对应接口权限。请在妙手 ERP → 开放平台 → 应用管理中勾选「售后退货」接口权限。",
+            content: "退货退款功能需要在采集上架服务后台申请对应接口权限。请在采集上架服务 → 开放平台 → 应用管理中勾选「售后退货」接口权限。",
             artifact: recordsArtifact({
-              headline: "妙手退货退款",
+              headline: "采集上架退货退款",
               records: [],
               columns: [{ key: "info", label: "说明" }],
-              source: "妙手开放平台",
+              source: "采集上架服务",
               emptyLabel: "接口权限未开通。",
             }),
           };
@@ -1090,9 +1093,9 @@ export async function runMiaoshouSceneQuery(
         throw error;
       }
       return {
-        content: `已读取妙手退货退款列表，共 ${total} 条。`,
+        content: `已读取采集上架退货退款列表，共 ${total} 条。`,
         artifact: recordsArtifact({
-          headline: "妙手退货退款",
+          headline: "采集上架退货退款",
           records: list,
           columns: [
             { key: "return_id", label: "退货 ID" },
@@ -1101,7 +1104,7 @@ export async function runMiaoshouSceneQuery(
             { key: "status", label: "状态" },
             { key: "create_time", label: "创建时间" },
           ],
-          source: `妙手开放平台 · order_return_list · ${now}`,
+          source: `采集上架服务 · order_return_list · ${now}`,
           emptyLabel: "暂无退货退款记录。",
         }),
       };
@@ -1112,9 +1115,9 @@ export async function runMiaoshouSceneQuery(
       const data = result.data as { goodsPurchaseOrderList?: Array<Record<string, unknown>>; total?: number } | undefined;
       const list = data?.goodsPurchaseOrderList ?? [];
       return {
-        content: `已读取妙手采购单列表，共 ${data?.total ?? list.length} 条。`,
+        content: `已读取采集上架采购单列表，共 ${data?.total ?? list.length} 条。`,
         artifact: recordsArtifact({
-          headline: "妙手采购单",
+          headline: "采集上架采购单",
           records: list,
           columns: [
             { key: "order_id", label: "采购单 ID" },
@@ -1123,7 +1126,7 @@ export async function runMiaoshouSceneQuery(
             { key: "status", label: "状态" },
             { key: "create_time", label: "创建时间" },
           ],
-          source: `妙手开放平台 · search_goods_purchase_order_page · ${now}`,
+          source: `采集上架服务 · search_goods_purchase_order_page · ${now}`,
           emptyLabel: "暂无采购单。",
         }),
       };
@@ -1134,9 +1137,9 @@ export async function runMiaoshouSceneQuery(
       const data = result.data as { goodsSkuWarehouseList?: Array<Record<string, unknown>>; total?: number } | undefined;
       const list = data?.goodsSkuWarehouseList ?? [];
       return {
-        content: `已读取妙手库存列表，共 ${data?.total ?? list.length} 条。`,
+        content: `已读取采集上架库存列表，共 ${data?.total ?? list.length} 条。`,
         artifact: recordsArtifact({
-          headline: "妙手库存",
+          headline: "采集上架库存",
           records: list,
           columns: [
             { key: "sku", label: "SKU" },
@@ -1145,7 +1148,7 @@ export async function runMiaoshouSceneQuery(
             { key: "stock", label: "库存" },
             { key: "safe_stock", label: "安全库存" },
           ],
-          source: `妙手开放平台 · search_goods_sku_warehouse_page · ${now}`,
+          source: `采集上架服务 · search_goods_sku_warehouse_page · ${now}`,
           emptyLabel: "暂无库存数据。",
         }),
       };
@@ -1153,7 +1156,7 @@ export async function runMiaoshouSceneQuery(
   }
 }
 
-/** 妙手场景查询后的建议 follow-ups */
+/** 采集上架场景查询后的建议 follow-ups */
 export function miaoshouSceneFollowUps(query: MiaoshouSceneQuery): string[] {
   const followUps: Record<MiaoshouSceneQuery, string[]> = {
     collect_item: ["查看公共采集箱", "认领到 TikTok 采集箱", "查看 TikTok 采集箱"],

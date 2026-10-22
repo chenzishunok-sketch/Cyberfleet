@@ -35,19 +35,19 @@ const CONNECTOR_HELP: Record<string, ConnectorHelp> = {
   miaoshou: {
     business: ["1688 货源采集 → AI 类目匹配 → 一键上架 TikTok 的流水线中枢", "库存、包裹、采购、退货等 ERP 场景查询", "定价台账的店铺解析"],
     keyUrl: "https://open.91miaoshou.com",
-    keyUrlLabel: "妙手开放平台",
-    testNote: "测试会真实调用妙手 API（读取定价模板列表，单请求）。",
+    keyUrlLabel: "采集上架服务开放平台",
+    testNote: "测试会真实调用采集上架服务 API（读取定价模板列表，单请求）。",
   },
   "tmapi-1688": {
     business: ["以图搜 1688 同款货源", "1688 商品详情、SKU、采购价读取", "定价 1688 比价与 DAG 选品搜货"],
     keyUrl: "https://www.tmapi.top",
-    keyUrlLabel: "TMAPI 控制台",
+    keyUrlLabel: "1688 货源数据服务",
     testNote: "测试会执行一次真实商品搜索（消耗 1 次调用额度；Token 无效/套餐过期会直接显示原因）。",
   },
   chuhaijiang: {
-    business: ["TikTok 美区爆品/达人/店铺/直播数据工具注入对话", "DAG 选品搜索执行器"],
+    business: ["TikTok 日区爆品/达人/店铺/直播数据工具注入对话", "DAG 选品搜索执行器"],
     keyUrl: "https://www.chuhaijiang.com",
-    keyUrlLabel: "出海匠开放平台",
+    keyUrlLabel: "日区选品数据服务",
     testNote: "测试通过 MCP listTools 验证凭证，零消耗。",
   },
   "web-search": {

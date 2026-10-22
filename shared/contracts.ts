@@ -124,7 +124,7 @@ export interface WorkflowShopOption {
   id: string;
   name: string;
   site: string;
-  /** 妙手数字店铺 ID（TikTok OAuth 密文店铺需要先解析） */
+  /** 采集数字店铺 ID（TikTok OAuth 密文店铺需要先解析） */
   miaoshouShopId?: string;
 }
 
@@ -166,12 +166,13 @@ export interface ProductPublishWorkflowRun {
   type: "product_publish";
   title: string;
   status: WorkflowStatus;
-  sourceUrl: string;
+  /** 1688 货源链接；从聊天「发布」意图基于采集箱商品创建的任务可能没有 */
+  sourceUrl?: string;
   targetPlatform: "tiktok";
   shopId?: string;
   shopName?: string;
   shopSite?: string;
-  /** 妙手数字店铺 ID，由 OAuth 密文解析而来；妙手 API 只接受数字 ID */
+  /** 采集数字店铺 ID，由 OAuth 密文解析而来；采集 API 只接受数字 ID */
   miaoshouShopId?: string;
   targetLanguage?: string;
   sourceItemId?: string;

@@ -304,7 +304,7 @@ export class WorkflowStore {
       run.type,
       run.title,
       run.status,
-      run.type === "product_publish" ? run.sourceUrl : null,
+      run.type === "product_publish" ? run.sourceUrl ?? null : null,
       ("shopId" in run) ? run.shopId ?? null : null,
       run.type === "product_publish" ? run.commonDetailId ?? null : null,
       run.type === "product_publish" ? run.platformDetailId ?? null : null,

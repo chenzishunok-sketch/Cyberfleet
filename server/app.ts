@@ -683,7 +683,7 @@ export function createApp() {
     }
     try {
       const data = await getTmapiItemDetailById(itemId, query.data);
-      response.json({ data, source: "TMAPI" });
+      response.json({ data, source: "1688 货源" });
     } catch (error) {
       const status = error instanceof TmapiError && error.statusCode === 422 ? 400 : 502;
       response.status(status).json({ error: error instanceof Error ? error.message : "读取 1688 商品失败。" });

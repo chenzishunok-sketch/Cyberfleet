@@ -35,7 +35,7 @@ import { inferTmapiItemIntent, runTmapiItemScene } from "./tmapi-scenes.ts";
 import { hasTmapiConfiguration } from "./tmapi-client.ts";
 import { callFastMossTool, getFastMossAbilityDescription, hasFastMossConfiguration } from "./mcp-client.ts";
 import { callChuhaijiangTool } from "./chuhaijiang-client.ts";
-import { productPublishWorkflowEngine, startProductPublishWorkflow } from "./product-publish-workflow.ts";
+import { productPublishWorkflowEngine, startProductPublishWorkflow, startPublishFromCollectBox } from "./product-publish-workflow.ts";
 import { startFlashSaleWorkflow } from "./flash-sale-workflow.ts";
 import { kolBridge } from "./kol-bridge.ts";
 import { parseKolIntent } from "./kol-intents.ts";
@@ -62,8 +62,8 @@ const MIAOSHOU_WRITE_SCENES = new Set<MiaoshouSceneQuery>([
 ]);
 const MIAOSHOU_WRITE_LABELS: Partial<Record<MiaoshouSceneQuery, string>> = {
   collect_item: "采集1688商品到公共采集箱",
-  ai_match_category: "匹配妙手商品类目",
-  supplement_info: "补全妙手商品资料",
+  ai_match_category: "匹配商品类目",
+  supplement_info: "补全商品资料",
   claim_to_platform: "认领商品到TikTok采集箱",
   publish_to_tiktok: "发布商品到TikTok",
 };
@@ -437,15 +437,15 @@ function createPlan(tool: ActionPlan["tool"], text: string, supplied?: Record<st
 
 function createMiaoshouApproval(request: ChatRequest, scene: MiaoshouSceneQuery): ActionPlan {
   const id = randomUUID();
-  const actionLabel = MIAOSHOU_WRITE_LABELS[scene] ?? "修改妙手商品数据";
-  const target = request.message.match(/https?:\/\/[^\s]+|\b\d{6,20}\b/i)?.[0] ?? "当前妙手商品";
-  const diffs: FieldDiff[] = [{ target, field: "妙手操作", before: "未执行", after: actionLabel }];
+  const actionLabel = MIAOSHOU_WRITE_LABELS[scene] ?? "修改采集商品数据";
+  const target = request.message.match(/https?:\/\/[^\s]+|\b\d{6,20}\b/i)?.[0] ?? "当前采集商品";
+  const diffs: FieldDiff[] = [{ target, field: "采集操作", before: "未执行", after: actionLabel }];
   const planBase = { id, scene, query: request.message, diffs, createdAt: Date.now() };
   const plan: ActionPlan = {
     id,
     tool: "miaoshou.operation",
     title: actionLabel,
-    summary: "审核通过后才会调用妙手接口。执行完成后会返回接口结果，不能重复提交同一审核计划。",
+    summary: "审核通过后才会调用采集上架接口。执行完成后会返回接口结果，不能重复提交同一审核计划。",
     store: dashboard.store.name,
     risk: scene === "claim_to_platform" || scene === "publish_to_tiktok" ? "high" : "medium",
     diffs,
@@ -749,27 +749,27 @@ function sceneQuerySteps(query: TikTokSceneQuery, requestedDays: number, source:
 
 function miaoshouQuerySteps(query: MiaoshouSceneQuery): RunStep[] {
   const labels: Record<MiaoshouSceneQuery, [string, string]> = {
-    collect_item: ["采集 1688 货源", "妙手采集接口"],
-    common_collect_box: ["公共采集箱", "妙手商品接口"],
-    tiktok_collect_box: ["TikTok 采集箱", "妙手 TK 采集接口"],
-    tiktok_categories: ["TK 类目树", "妙手类目接口"],
-    ai_match_category: ["AI 类目匹配", "妙手 AI 接口"],
-    supplement_info: ["补充信息", "妙手 AI 补充信息接口"],
-    claim_to_platform: ["认领到平台采集箱", "妙手认领接口"],
-    miaoshou_shops: ["妙手授权店铺", "妙手店铺接口"],
-    publish_to_tiktok: ["发布到 TK", "妙手发布接口"],
-    publish_records: ["发布记录", "妙手发布记录接口"],
-    price_templates: ["定价模板", "妙手定价接口"],
-    miaoshou_packages: ["妙手包裹", "妙手履约接口"],
-    miaoshou_returns: ["妙手退货退款", "妙手售后接口"],
-    miaoshou_purchase_orders: ["妙手采购单", "妙手采购接口"],
-    miaoshou_inventory: ["妙手库存", "妙手仓储接口"],
+    collect_item: ["采集 1688 货源", "采集接口"],
+    common_collect_box: ["公共采集箱", "商品接口"],
+    tiktok_collect_box: ["TikTok 采集箱", "TK 采集接口"],
+    tiktok_categories: ["TK 类目树", "类目接口"],
+    ai_match_category: ["AI 类目匹配", "AI 接口"],
+    supplement_info: ["补充信息", "AI 补充信息接口"],
+    claim_to_platform: ["认领到平台采集箱", "认领接口"],
+    miaoshou_shops: ["授权店铺", "店铺接口"],
+    publish_to_tiktok: ["发布到 TK", "发布接口"],
+    publish_records: ["发布记录", "发布记录接口"],
+    price_templates: ["定价模板", "定价接口"],
+    miaoshou_packages: ["包裹", "履约接口"],
+    miaoshou_returns: ["退货退款", "售后接口"],
+    miaoshou_purchase_orders: ["采购单", "采购接口"],
+    miaoshou_inventory: ["库存", "仓储接口"],
   };
   const [scene, api] = labels[query];
   return [
-    { id: `miaoshou-${query}-scope`, label: "确认妙手场景", detail: scene, status: "done" },
-    { id: `miaoshou-${query}-read`, label: "调用妙手 API", detail: api, status: "done" },
-    { id: `miaoshou-${query}-result`, label: "整理结果", detail: "妙手开放平台", status: "done" },
+    { id: `miaoshou-${query}-scope`, label: "确认采集场景", detail: scene, status: "done" },
+    { id: `miaoshou-${query}-read`, label: "调用采集 API", detail: api, status: "done" },
+    { id: `miaoshou-${query}-result`, label: "整理结果", detail: "采集上架服务", status: "done" },
   ];
 }
 
@@ -1479,7 +1479,7 @@ function createLiveToolExecutor(request: ChatRequest): ToolExecutorFn {
             const result = await runMiaoshouSceneQuery(sceneQuery, query ?? scene, request.history);
             return result.content;
           } catch (error) {
-            return `妙手查询失败：${error instanceof Error ? error.message : "未知错误"}`;
+            return `采集查询失败：${error instanceof Error ? error.message : "未知错误"}`;
           }
         }
         if (decisionAny.tool === "web_search") {
@@ -1508,13 +1508,13 @@ function createLiveToolExecutor(request: ChatRequest): ToolExecutorFn {
             return `FastMoss 调用失败：${error instanceof Error ? error.message : "未知错误"}`;
           }
         }
-        // 处理出海匠 MCP 只读工具
+        // 处理日区选品 MCP 只读工具
         if (decisionAny.tool.startsWith("chuhaijiang_")) {
           try {
             const result = await callChuhaijiangTool(decisionAny.tool, decisionAny.args);
-            return result.isError ? `[出海匠错误] ${result.content}` : result.content;
+            return result.isError ? `[日区选品错误] ${result.content}` : result.content;
           } catch (error) {
-            return `出海匠调用失败：${error instanceof Error ? error.message : "未知错误"}`;
+            return `日区选品调用失败：${error instanceof Error ? error.message : "未知错误"}`;
           }
         }
         return "该工具尚未接入。";
@@ -1643,7 +1643,7 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
   const sourcingIntent = inferSourcingIntent(request);
   if (sourcingIntent) {
     if (!hasTmapiConfiguration()) {
-      return { message: message("1688 货源数据尚未连接，请先在 Skill 管理中配置 TMAPI Token。"), runId: randomUUID() };
+      return { message: message("1688 货源数据尚未连接，请先在 Skill 管理中配置 1688 货源 Token。"), runId: randomUUID() };
     }
     try {
       const result = await runSourcingSearch(sourcingIntent);
@@ -1664,7 +1664,7 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
     }
   }
 
-  // 快速路径：只读的 1688 货源体检。放在妙手采集前，先看真实 SKU 和采购价。
+  // 快速路径：只读的 1688 货源体检。放在采集前，先看真实 SKU 和采购价。
   const tmapiIntent = inferTmapiItemIntent(request.message);
   if (tmapiIntent && hasTmapiConfiguration()) {
     try {
@@ -1675,10 +1675,10 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
         [
           { id: "parse", label: "识别 1688 商品", detail: `商品 ID ${tmapiIntent.itemId}`, status: "done" },
           { id: "read", label: "读取货源数据", detail: "已核对 SKU、采购价、库存和重量", status: "done" },
-          { id: "present", label: "生成商品体检", detail: "本次为只读查询，未修改妙手或 TikTok 数据", status: "done" },
+          { id: "present", label: "生成商品体检", detail: "本次为只读查询，未修改采集上架或 TikTok 数据", status: "done" },
         ],
         [
-          `把 https://detail.1688.com/offer/${tmapiIntent.itemId}.html 采集到妙手`,
+          `把 https://detail.1688.com/offer/${tmapiIntent.itemId}.html 采集到采集箱`,
           `按一件代发场景重新读取 1688 商品 ID ${tmapiIntent.itemId}`,
         ],
       );
@@ -1727,20 +1727,33 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
     }
   }
 
-  // ── 快速路径：妙手场景查询和单步操作 ──
+  // ── 快速路径：采集场景查询和单步操作 ──
   if (process.env.DEMO_MODE !== "true") {
     const miaoshouQuery = inferMiaoshouSceneQuery(request.message);
     if (miaoshouQuery) {
       if (miaoshouQuery === "publish_to_tiktok") {
-        return {
-          message: message("为了避免发布错商品或店铺，聊天中不再直接提交发布。请在任务中心粘贴 1688 链接启动完整流程，发布前会让你确认目标店铺。"),
-          runId: randomUUID(),
-        };
+        // 聊天里直接发布：复用 TikTok 采集箱里最近一件已认领、未发布的商品生成上架任务。
+        // 不直接提交发布——保存商品编辑与最终发布仍会在任务卡片里分别审核。
+        try {
+          const run = await startPublishFromCollectBox();
+          const responseMsg = message(
+            `已基于 TikTok 采集箱商品 ${run.platformDetailId} 生成上架任务审核卡。审核通过后会自动补全资料并进入保存/发布确认；不会再重复采集或认领。`,
+            { kind: "workflow", run },
+          );
+          void extractAndSaveMemory(request, responseMsg);
+          return { message: responseMsg, runId: randomUUID() };
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "采集箱查询失败。";
+          return {
+            message: message(`暂时无法在聊天里创建发布任务：${reason} 也可以粘贴 1688 链接，我会走完整的采集 → 认领 → 发布流程。`),
+            runId: randomUUID(),
+          };
+        }
       }
       if (MIAOSHOU_WRITE_SCENES.has(miaoshouQuery)) {
         const plan = createMiaoshouApproval(request, miaoshouQuery);
         return {
-          message: message("这项操作会修改妙手数据。我已生成审核卡片，审核通过后才会调用接口。", { kind: "approval", plan }, createSteps("write")),
+          message: message("这项操作会修改采集商品数据。我已生成审核卡片，审核通过后才会调用接口。", { kind: "approval", plan }, createSteps("write")),
           runId: randomUUID(),
         };
       }
@@ -1758,8 +1771,8 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
         void extractAndSaveMemory(request, responseMsg);
         return { message: responseMsg, runId: randomUUID() };
       } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : "妙手 API 调用失败";
-        const responseMsg = message(`妙手接口调用遇到问题：${errorMsg}`, undefined, undefined, ["查看公共采集箱", "查看全部商品和 SKU"]);
+        const errorMsg = error instanceof Error ? error.message : "采集上架 API 调用失败";
+        const responseMsg = message(`采集上架接口调用遇到问题：${errorMsg}`, undefined, undefined, ["查看公共采集箱", "查看全部商品和 SKU"]);
         void extractAndSaveMemory(request, responseMsg);
         return { message: responseMsg, runId: randomUUID() };
       }
@@ -2046,7 +2059,7 @@ export async function approveAction(actionId: string): Promise<ActionResponse> {
       if (miaoshouAction.status === "verification_pending") {
         return {
           actionStatus: "verification_pending",
-          message: message("妙手写入请求的最终结果仍需核对。系统不会重复提交，请先查询采集箱、发布记录或目标店铺的最新状态。"),
+          message: message("采集写入请求的最终结果仍需核对。系统不会重复提交，请先查询采集箱、发布记录或目标店铺的最新状态。"),
         };
       }
       if (plan.status !== "pending") throw new Error("该审核计划已经处理，不能重复提交。");
@@ -2062,14 +2075,14 @@ export async function approveAction(actionId: string): Promise<ActionResponse> {
         try {
           recordOperation(`${plan.title}：${plan.diffs.map((diff) => `${diff.target} ${diff.after}`).join("；")}`);
         } catch {
-          // 记忆记录失败不影响已经完成的妙手操作。
+          // 记忆记录失败不影响已经完成的采集操作。
         }
         return {
           message: message(result.content, {
             kind: "receipt",
             actionId,
             title: `${plan.title}已完成`,
-            summary: "妙手接口已经完成本次审核范围内的操作。该审核计划已锁定，不能重复提交。",
+            summary: "采集上架接口已经完成本次审核范围内的操作。该审核计划已锁定，不能重复提交。",
             requestId,
             completedAt: new Date().toISOString(),
             diffs: plan.diffs,
@@ -2079,7 +2092,7 @@ export async function approveAction(actionId: string): Promise<ActionResponse> {
         saveMiaoshouAction(miaoshouAction, "verification_pending");
         return {
           actionStatus: "verification_pending",
-          message: message(`妙手写入请求可能已经生效，但暂时无法确认最终结果：${error instanceof Error ? error.message : "未知错误"}。系统已停止重复提交，请先查询最新状态。`),
+          message: message(`采集写入请求可能已经生效，但暂时无法确认最终结果：${error instanceof Error ? error.message : "未知错误"}。系统已停止重复提交，请先查询最新状态。`),
         };
       }
     }

@@ -1,6 +1,6 @@
 import type { DagDefinition } from "../shared/contracts.ts";
 import { registerExecutor } from "./dag-workflow-engine.ts";
-// 加载真实业务执行器（出海匠 / TMAPI / 妙手 ERP），确保执行器先于模板注册
+// 加载真实业务执行器（日区选品 / 1688 货源 / 采集上架服务），确保执行器先于模板注册
 import "./dag-business-executors.ts";
 
 // ─── DAG 模板注册表 ────────────────────────────────────────────
@@ -219,16 +219,16 @@ registerDagTemplate({
  * 模板 3：选品上架闭环（五能力源真实数据）
  *
  * 业务流程（运营实际走法）：
- *   1. 出海匠（TikTok 美区爆品情报）+ TMAPI（1688 货源）并行搜索同一关键词
+ *   1. 日区选品（TikTok 日区爆品情报）+ 1688 货源数据（1688 货源）并行搜索同一关键词
  *   2. 任一数据源有结果即进入采集；双源皆空则提醒换词
- *   3. 妙手采集货源 → 认领到 TikTok 采集箱 → AI 类目/属性匹配 → 翻译 + AI 文案
+ *   3. 采集货源 → 认领到 TikTok 采集箱 → AI 类目/属性匹配 → 翻译 + AI 文案
  *   4. human_gate 人工审批（发布前的最终确认，即审批闭环）
  *   5. 审批通过后发布到 TikTok 店铺
  *
  * 输入参数（DAG input）：
  *   keyword: string         搜索关键词（必填）
  *   sourceUrls?: string[]   可选的直接 1688 链接（跳过搜索阶段，无结果时兜底）
- *   shopIds?: (string|number)[]  妙手店铺编号（必填，用于认领/翻译/发布）
+ *   shopIds?: (string|number)[]  采集上架店铺编号（必填，用于认领/翻译/发布）
  *   site?: string           TikTok 站点，默认 US
  *   targetLanguage?: string 翻译目标语言，默认 en
  *
@@ -237,7 +237,7 @@ registerDagTemplate({
 registerDagTemplate({
   type: "product_launch_closed_loop",
   name: "选品上架闭环",
-  description: "出海匠 + 1688 双源选品 → 妙手采集/认领/AI匹配/翻译 → 人工审批 → 发布 TikTok，真实 API 全链路",
+  description: "日区选品 + 1688 双源选品 → 采集/认领/AI匹配/翻译 → 人工审批 → 发布 TikTok，真实 API 全链路",
   entry: "start",
   nodes: [
     {
@@ -249,7 +249,7 @@ registerDagTemplate({
     {
       id: "parallel_search",
       type: "parallel",
-      label: "并行搜索（出海匠 TikTok 情报 + 1688 货源）",
+      label: "并行搜索（日区选品情报 + 1688 货源）",
       branches: [
         ["chuhaijiang_search"],
         ["tmapi_search"],
@@ -258,14 +258,14 @@ registerDagTemplate({
     {
       id: "chuhaijiang_search",
       type: "task",
-      label: "出海匠 · TikTok 美区爆品情报搜索",
+      label: "日区选品 · TikTok 日区爆品情报搜索",
       agent: "product",
       executor: "chuhaijiang_search",
     },
     {
       id: "tmapi_search",
       type: "task",
-      label: "TMAPI · 1688 货源关键词搜索",
+      label: "1688 货源 · 关键词搜索",
       agent: "sourcing",
       executor: "tmapi_search",
     },
@@ -282,7 +282,7 @@ registerDagTemplate({
     {
       id: "miaoshou_collect",
       type: "task",
-      label: "妙手 · 采集货源到公共采集箱",
+      label: "采集上架 · 采集货源到公共采集箱",
       agent: "sourcing",
       executor: "miaoshou_collect",
     },
@@ -295,21 +295,21 @@ registerDagTemplate({
     {
       id: "miaoshou_claim",
       type: "task",
-      label: "妙手 · 认领到 TikTok 采集箱",
+      label: "采集上架 · 认领到 TikTok 采集箱",
       agent: "sourcing",
       executor: "miaoshou_claim",
     },
     {
       id: "miaoshou_ai_match",
       type: "task",
-      label: "妙手 · AI 类目 + 属性匹配",
+      label: "采集上架 · AI 类目 + 属性匹配",
       agent: "publishing",
       executor: "miaoshou_ai_match",
     },
     {
       id: "miaoshou_content",
       type: "task",
-      label: "妙手 · 商品翻译 + AI 标题描述",
+      label: "采集上架 · 商品翻译 + AI 标题描述",
       agent: "content",
       executor: "miaoshou_content",
     },
@@ -323,7 +323,7 @@ registerDagTemplate({
     {
       id: "miaoshou_publish",
       type: "task",
-      label: "妙手 · 发布到 TikTok 店铺",
+      label: "采集上架 · 发布到 TikTok 店铺",
       agent: "publishing",
       executor: "miaoshou_publish",
     },
@@ -352,21 +352,21 @@ registerDagTemplate({
 });
 
 /**
- * 模板 4：妙手 7 步上架（已知 1688 链接直接上架）
+ * 模板 4：采集上架 7 步上架（已知 1688 链接直接上架）
  *
- * 用于运营已经选好货源链接的场景，跳过搜索阶段，直接走妙手 7 步：
+ * 用于运营已经选好货源链接的场景，跳过搜索阶段，直接走采集上架 7 步：
  *   ① 采集 → ② 认领 → ③ AI 类目/属性 → ④ 翻译 + AI 文案
  *   → ⑤ 人工审批 → ⑥ 发布 → ⑦ 完成
  *
  * 输入参数（DAG input）：
  *   sourceUrls: string[]      1688 商品链接（必填）
- *   shopIds?: (string|number)[]  妙手店铺编号（必填）
+ *   shopIds?: (string|number)[]  采集上架店铺编号（必填）
  *   site?: string             默认 US
  *   targetLanguage?: string   默认 en
  */
 registerDagTemplate({
   type: "miaoshou_7step_publish",
-  name: "妙手 7 步上架",
+  name: "采集上架 7 步",
   description: "已知 1688 链接：采集 → 认领 → AI 类目/属性 → 翻译/AI 文案 → 人工审批 → 发布 → 完成",
   entry: "start",
   nodes: [

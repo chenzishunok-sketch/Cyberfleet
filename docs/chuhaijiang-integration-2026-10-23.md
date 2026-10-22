@@ -63,7 +63,7 @@ systemPrompt: ROUTER_SYSTEM_PROMPT + skillAbility + fastmossAbility + chuhaijian
 systemPrompt: AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + chuhaijiangAbility + ...
 ```
 
-现在 LLM 能明确知道：出海匠提供 `search/get_detail/get_related/amazon/...` 12 个工具，用于 TikTok 美区选品。
+现在 LLM 能明确知道：出海匠提供 `search/get_detail/get_related/amazon/...` 12 个工具，用于 TikTok 日区选品。
 
 ---
 
@@ -76,7 +76,7 @@ systemPrompt: AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + chuhaijiang
 | **TikTok Shop 官方** | ✅ | 店铺商品/订单/秒杀/库存/改价/上下架 | "店铺表现"、"库存"、"改价"、"秒杀" |
 | **妙手 ERP** | ✅ | 1688 采集/认领/图片翻译/类目/上架 | "采集"、"上架到 TikTok" |
 | **TMAPI 1688** | ✅ | 1688 货源详情/SKU/采购价/库存/重量 | "1688 货源"、"采购价" |
-| **出海匠 MCP** | ✅ 本轮接入 | TikTok 美区选品/达人/视频/广告/直播/Amazon 交叉验证 | "美区爆品"、"达人"、"竞品分析" |
+| **出海匠 MCP** | ✅ 本轮接入 | TikTok 日区选品/达人/视频/广告/直播/Amazon 交叉验证 | "日区爆品"、"达人"、"竞品分析" |
 | **FastMoss MCP** | 待配置 | TikTok 数据分析（爆品/达人/店铺/直播） | "数据分析"、"选品" |
 | **LLM (DeepSeek)** | ✅ | 意图路由、记忆抽取、ReAct 推理、内容生成 | （底层） |
 
@@ -105,7 +105,7 @@ TMAP 1688 取数 → 飞书算价(V/Y) → 妙手采集 → 占位参数 → 图
 ### 4.2 出海匠加入后的完整商业闭环
 
 ```
-[选品层]  出海匠 search(美区爆品) + TMAPI(1688货源)   ← 本轮接通
+[选品层]  出海匠 search(日区爆品) + TMAPI(1688货源)   ← 本轮接通
           ↓ 双源交叉：TikTok 需求 × 1688 供给
 [定价层]  飞书总表算 V(定价) / Y(划线价)
           ↓
@@ -128,7 +128,7 @@ start → [chuhaijiang_search ∥ tmapi_search]（并行双源搜索）
 
 | 场景 | 用哪些工具 | 产出 |
 |---|---|---|
-| 美区选品 | `search(products)` → `get_detail` → `amazon` | 爆品 + 需求验证 + 价格锚定 |
+| 日区选品 | `search(products)` → `get_detail` → `amazon` | 爆品 + 需求验证 + 价格锚定 |
 | 竞品分析 | `get_related(products, id, competitors)` | 竞品清单 |
 | 达人建联 | `search(creators)` → `get_related(products, id, creators)` | 谁在推这个品、带货效果 |
 | 社媒复盘 | `social_analytics` | KPI / 爆款视频 / 爆款商品 |
@@ -158,7 +158,7 @@ start → [chuhaijiang_search ∥ tmapi_search]（并行双源搜索）
 
 **能直接触发的问法**（运营总监对话里）：
 
-- "帮我找美区近 7 天最火的护肤爆品"
+- "帮我找日区近 7 天最火的护肤爆品"
 - "查一下这个 TikTok 商品有多少达人带货、效果怎么样"
 - "这个品在 Amazon 上的长期需求和评论痛点是什么"
 - "分析一下我店铺的社媒表现"

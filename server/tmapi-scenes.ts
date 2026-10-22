@@ -113,7 +113,7 @@ export async function runTmapiItemScene(intent: TmapiItemIntent): Promise<TmapiI
         { key: "dimensions_cm", label: "长宽高 (cm)" },
       ],
       rows,
-      source: `TMAPI · GET /1688/item_detail · ${intent.itemId}`,
+      source: `1688 货源 · GET /1688/item_detail · ${intent.itemId}`,
       emptyLabel: "该商品没有返回 SKU 记录。",
     },
   };

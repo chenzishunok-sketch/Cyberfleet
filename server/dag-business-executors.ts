@@ -1,7 +1,7 @@
 /**
  * DAG 真实业务执行器 —— 五能力源业务闭环
  *
- * 把出海匠（TikTok 市场情报）、TMAPI（1688 货源）、妙手 ERP（采集/认领/翻译/发布）
+ * 把日区选品（TikTok 市场情报）、1688 货源数据（1688 货源）、采集上架服务（采集/认领/翻译/发布）
  * 的真实 API 能力注册为 DAG 执行器，供 dag-templates.ts 的「选品上架闭环」模板使用。
  *
  * 权限边界（与审批闭环约定一致）：
@@ -45,11 +45,11 @@ const toNumbers = (v: unknown): number[] => {
   return arr.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0);
 };
 
-/** 简单延时（妙手 OpenAPI 对账号有每秒请求频率限制） */
+/** 简单延时（采集上架 OpenAPI 对账号有每秒请求频率限制） */
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * 自动解析妙手 TikTok 店铺（运营未显式提供 shopIds 时兜底）。
+ * 自动解析采集上架 TikTok 店铺（运营未显式提供 shopIds 时兜底）。
  *
  * 站点顺序交给 `miaoshouResolveSite()`（与店铺列表、发布流程共用一份站点表）。
  * 之前这里写死八站点且不含日本站，日本单店账号会白跑八次请求、每次间隔 1.2 秒，
@@ -98,19 +98,19 @@ function extractSourceUrls(ctx: DagExecutionContext, nodeIds: string[]): string[
 
 // ─── 只读数据源 ────────────────────────────────────────────────
 
-/** 出海匠 TikTok 美区市场情报搜索（只读）。未配置 Key 时降级跳过，不阻塞闭环。 */
+/** 日区选品 TikTok 日区市场情报搜索（只读）。未配置 Key 时降级跳过，不阻塞闭环。 */
 registerExecutor("chuhaijiang_search", async (input, ctx) => {
   const keyword = str(pick(ctx, "keyword", []));
   if (!keyword) throw new Error("请提供搜索关键词。");
-  // 出海匠 search 的 limit 硬上限为 10，超出时服务端仍返回 isError=false，只在正文里带 error
+  // 日区选品 search 的 limit 硬上限为 10，超出时服务端仍返回 isError=false，只在正文里带 error
   const limit = Math.min(10, Math.max(1, Math.trunc(Number(pick(ctx, "limit", []) ?? 10)) || 10));
-  // 出海匠 search 必填 entity + country；默认搜美区爆品，允许入参覆盖
+  // 日区选品 search 必填 entity + country；默认搜日区爆品，允许入参覆盖
   const entity = str(pick(ctx, "entity", []) ?? input.entity ?? "products");
   const country = str(pick(ctx, "country", []) ?? input.country ?? "us");
 
   const { apiKey } = getChuhaijiangRuntimeConfig();
   if (!apiKey) {
-    return { skipped: true, reason: "出海匠 API Key 未配置", found: false, items: [], count: 0 };
+    return { skipped: true, reason: "日区选品 API Key 未配置", found: false, items: [], count: 0 };
   }
 
   const result = await callChuhaijiangTool("chuhaijiang_search", { keyword, limit, entity, country });
@@ -119,13 +119,13 @@ registerExecutor("chuhaijiang_search", async (input, ctx) => {
   let items: unknown[] = [];
   try {
     const parsed = JSON.parse(result.content) as Record<string, unknown> | unknown[];
-    // 参数校验失败时出海匠返回 { error, invalid_param } 且 isError=false，必须显式上抛，
+    // 参数校验失败时日区选品返回 { error, invalid_param } 且 isError=false，必须显式上抛，
     // 否则会被当成“无搜索结果”，工作流静默走空结果分支
     if (Array.isArray(parsed)) {
       items = parsed;
     } else {
       if (typeof parsed?.error === "string" && parsed.error.trim()) {
-        throw new Error(`出海匠返回错误：${parsed.error}`);
+        throw new Error(`日区选品返回错误：${parsed.error}`);
       }
       const nestedData = parsed?.data;
       const nestedItems = nestedData && typeof nestedData === "object" ? (nestedData as Record<string, unknown>).items : undefined;
@@ -133,7 +133,7 @@ registerExecutor("chuhaijiang_search", async (input, ctx) => {
       items = Array.isArray(rawItems) ? rawItems : [];
     }
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("出海匠返回错误")) throw error;
+    if (error instanceof Error && error.message.startsWith("日区选品返回错误")) throw error;
     items = [];
   }
   return {
@@ -142,11 +142,11 @@ registerExecutor("chuhaijiang_search", async (input, ctx) => {
     found: items.length > 0,
     items,
     count: items.length,
-    summary: `出海匠返回 ${items.length} 条 TikTok 选品情报`,
+    summary: `日区选品返回 ${items.length} 条 TikTok 选品情报`,
   };
 });
 
-/** TMAPI 1688 关键词搜索货源（只读） */
+/** 1688 货源关键词搜索货源（只读） */
 registerExecutor("tmapi_search", async (input, ctx) => {
   const keyword = str(pick(ctx, "keyword", []));
   if (!keyword) throw new Error("请提供搜索关键词。");
@@ -170,9 +170,9 @@ registerExecutor("tmapi_search", async (input, ctx) => {
   };
 });
 
-// ─── 妙手 ERP 写操作链 ─────────────────────────────────────────
+// ─── 采集上架服务写操作链 ─────────────────────────────────────────
 
-/** 第 1 步：采集货源到妙手公共采集箱，轮询等待采集完成，返回 detailIds */
+/** 第 1 步：采集货源到采集上架公共采集箱，轮询等待采集完成，返回 detailIds */
 registerExecutor("miaoshou_collect", async (input, ctx) => {
   const rawUrls = pick(ctx, "sourceUrls", []);
   let sourceUrls = Array.isArray(rawUrls) ? rawUrls.map(str).filter(Boolean) : [];
@@ -182,7 +182,7 @@ registerExecutor("miaoshou_collect", async (input, ctx) => {
   if (!sourceUrls.length) {
     throw new Error("未找到可采集的 1688 商品链接：请在 sourceUrls 中提供，或先执行搜索步骤。");
   }
-  // 妙手 OpenAPI 账号级限流（每秒约 1 次），默认每次最多采集 3 个，可被入参 maxCollect 覆盖
+  // 采集上架 OpenAPI 账号级限流（每秒约 1 次），默认每次最多采集 3 个，可被入参 maxCollect 覆盖
   const maxCollect = Number(pick(ctx, "maxCollect", []) ?? input.maxCollect ?? 3);
   const limitedUrls = sourceUrls.slice(0, Math.max(1, Math.min(10, Math.trunc(maxCollect) || 3)));
   const platform = str(pick(ctx, "sourcePlatform", [])) || "1688";
@@ -215,7 +215,7 @@ registerExecutor("miaoshou_collect", async (input, ctx) => {
     collected,
     detailIds,
     detailIdCount: detailIds.length,
-    summary: `已采集 ${detailIds.length} 个商品到妙手公共采集箱`,
+    summary: `已采集 ${detailIds.length} 个商品到采集上架公共采集箱`,
   };
 });
 
@@ -263,7 +263,7 @@ registerExecutor("miaoshou_ai_match", async (input, ctx) => {
   }
   if (!detailIds.length) throw new Error("没有商品 detailId。");
   if (!shopIds.length) {
-    throw new Error("没有店铺 shopId：妙手账号下未找到 TikTok 店铺，请先在妙手后台授权店铺，或在指令中提供店铺编号。");
+    throw new Error("没有店铺 shopId：采集上架账号下未找到 TikTok 店铺，请先在采集上架后台授权店铺，或在指令中提供店铺编号。");
   }
   site = site || "US";
 

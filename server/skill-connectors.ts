@@ -15,7 +15,7 @@ export interface SkillConnectionTestResult {
 
 /**
  * 用当前生效配置（界面保存 > .env）对连接器发一次最小真实业务调用。
- * 妙手/TMAPI/搜索会消耗少量套餐额度；出海匠/FastMoss 走 MCP listTools 零消耗；飞书取 token 零消耗。
+ * 采集上架/1688 货源/搜索会消耗少量套餐额度；日区选品/FastMoss 走 MCP listTools 零消耗；飞书取 token 零消耗。
  */
 export async function testSkillConnection(skillId: string): Promise<SkillConnectionTestResult> {
   const startedAt = Date.now();
@@ -23,15 +23,15 @@ export async function testSkillConnection(skillId: string): Promise<SkillConnect
   try {
     switch (skillId) {
       case "miaoshou": {
-        if (getMiaoshouRuntimeConfig().source === "missing") throw new Error("妙手 ERP 尚未配置，请先填写 App Key 和 App Secret。");
+        if (getMiaoshouRuntimeConfig().source === "missing") throw new Error("采集上架服务尚未配置，请先填写 App Key 和 App Secret。");
         await miaoshouRequest("/open/v1/product/collect_box/tiktok/price_template/get_price_template_list", { pageNo: 1, pageSize: 1 }, { retry: false });
-        return { ok: true, latencyMs: latency(), detail: "妙手 API 鉴权通过，采集与上架流程可以正常调用。" };
+        return { ok: true, latencyMs: latency(), detail: "采集上架 API 鉴权通过，采集与上架流程可以正常调用。" };
       }
       case "tmapi-1688": {
-        if (getTmapiRuntimeConfig().source === "missing") throw new Error("TMAPI 尚未配置，请先填写 API Token。");
+        if (getTmapiRuntimeConfig().source === "missing") throw new Error("1688 货源尚未配置，请先填写 API Token。");
         const result = await searchTmapiItemsByKeyword("数据线", { pageSize: 1 });
         const count = Array.isArray(result.items) ? result.items.length : 0;
-        return { ok: true, latencyMs: latency(), detail: `TMAPI 连接成功，测试搜索返回 ${count} 个商品（消耗 1 次调用额度）。` };
+        return { ok: true, latencyMs: latency(), detail: `1688 货源连接成功，测试搜索返回 ${count} 个商品（消耗 1 次调用额度）。` };
       }
       case "web-search": {
         if (getWebSearchRuntimeConfig().source === "missing") throw new Error("联网搜索尚未配置，请先填写 Tavily API Key。");
@@ -40,9 +40,9 @@ export async function testSkillConnection(skillId: string): Promise<SkillConnect
         return { ok: true, latencyMs: latency(), detail: `联网搜索可用，测试搜索返回 ${count} 条结果（消耗 1 次搜索额度）。` };
       }
       case "chuhaijiang": {
-        if (getChuhaijiangRuntimeConfig().source === "missing") throw new Error("出海匠 API Key 尚未配置。");
+        if (getChuhaijiangRuntimeConfig().source === "missing") throw new Error("日区选品 API Key 尚未配置。");
         const count = await probeChuhaijiangConnection();
-        return { ok: true, latencyMs: latency(), detail: `出海匠 MCP 连接成功，${count} 个只读选品工具可用（零消耗）。` };
+        return { ok: true, latencyMs: latency(), detail: `日区选品 MCP 连接成功，${count} 个只读选品工具可用（零消耗）。` };
       }
       case "fastmoss": {
         if (getFastMossRuntimeConfig().source === "missing") throw new Error("FastMoss MCP 尚未配置，请先填写 API Key。");

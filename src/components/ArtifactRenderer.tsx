@@ -284,7 +284,7 @@ export function ArtifactRenderer({ artifact, busyActionId, onApprove, onReject, 
                 )}
                 <div className="candidate-actions">
                   <button className="primary-button" onClick={() => onPrompt(`分析1688商品ID ${candidate.itemId} 的SKU、重量、供应商和风险，先不采集`)}><TrendingUp size={15} />选择并查看详情</button>
-                  <button className="secondary-button" onClick={() => onPrompt(`把 ${candidate.productUrl} 采集到妙手并进入TikTok上架流程，先不发布`)}><Truck size={15} />进入上架</button>
+                  <button className="secondary-button" onClick={() => onPrompt(`把 ${candidate.productUrl} 采集并进入TikTok上架流程，先不发布`)}><Truck size={15} />进入上架</button>
                 </div>
               </div>
             </article>

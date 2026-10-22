@@ -190,19 +190,19 @@ export function clearTmapiCache(): void {
 
 function errorMessage(status: number, fallback: string): string {
   const messages: Record<number, string> = {
-    401: "TMAPI Token 无效或未配置。",
-    417: "TMAPI 暂时无法读取这个商品，请稍后重试。",
-    422: "TMAPI 请求参数不正确。",
-    439: "TMAPI 套餐已过期或余额不足。",
-    499: "TMAPI 读取超时，请重试。",
-    500: "TMAPI 服务发生异常。",
-    503: "TMAPI 当前请求过多，请稍后重试。",
+    401: "1688 货源 Token 无效或未配置。",
+    417: "1688 货源暂时无法读取这个商品，请稍后重试。",
+    422: "1688 货源请求参数不正确。",
+    439: "1688 货源套餐已过期或余额不足。",
+    499: "1688 货源读取超时，请重试。",
+    500: "1688 货源服务发生异常。",
+    503: "1688 货源当前请求过多，请稍后重试。",
   };
   if (status === 422 && /invalid image url[,: ]+access failed/i.test(fallback)) {
-    return "TMAPI 无法访问临时图片链接，已返回图片读取失败。";
+    return "1688 货源无法访问临时图片链接，已返回图片读取失败。";
   }
   if (status === 422 && /not an image type/i.test(fallback)) {
-    return "TMAPI 读取到的临时链接不是图片文件。";
+    return "1688 货源读取到的临时链接不是图片文件。";
   }
   return messages[status] ?? fallback;
 }
@@ -212,14 +212,14 @@ async function tmapiRequest<S extends z.ZodTypeAny>(path: string, init: RequestI
   if (!apiToken) throw new TmapiError("1688 货源数据 API 尚未配置。");
 
   const url = new URL(path, `${baseUrl.replace(/\/$/, "")}/`);
-  // TMAPI 鉴权走 `apikey` 请求头，不是 query 参数 `apiToken`。
+  // 1688 货源数据接口鉴权走 `apikey` 请求头，不是 query 参数 `apiToken`。
   // 实测把 token 放 query 会返回 401 {"code":4013,"message":"unauthorized"}，
   // 放 header 才返回 200。参数名用 snake_case（item_id），与官方一致。
   url.search = query.toString();
 
   let response: Response;
   try {
-    // TMAPI 官方接口目前使用 HTTP。macOS 系统代理可能把它错误转发到 HTTPS 端口，
+    // 1688 货源数据接口目前使用 HTTP。macOS 系统代理可能把它错误转发到 HTTPS 端口，
     // 因此只对该 HTTP 请求使用直连；其他外部服务仍沿用全局代理配置。
     response = await fetch(url, {
       ...init,
@@ -232,9 +232,9 @@ async function tmapiRequest<S extends z.ZodTypeAny>(path: string, init: RequestI
     } as RequestInit & { dispatcher?: Agent });
   } catch (error) {
     if (error instanceof Error && error.name === "TimeoutError") {
-      throw new TmapiError("TMAPI 读取超时，请重试。", 499);
+      throw new TmapiError("1688 货源读取超时，请重试。", 499);
     }
-    throw new TmapiError(`无法连接 TMAPI：${error instanceof Error ? error.message : "未知错误"}`);
+    throw new TmapiError(`无法连接 1688 货源数据服务：${error instanceof Error ? error.message : "未知错误"}`);
   }
 
   const text = await response.text();
@@ -242,14 +242,14 @@ async function tmapiRequest<S extends z.ZodTypeAny>(path: string, init: RequestI
   try {
     payload = JSON.parse(text);
   } catch {
-    throw new TmapiError("TMAPI 返回了无法识别的数据。", response.status);
+    throw new TmapiError("1688 货源返回了无法识别的数据。", response.status);
   }
 
   const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
   const requestId = typeof record.request_id === "string" ? record.request_id : undefined;
   const remoteMessage = typeof record.message === "string"
     ? record.message
-    : typeof record.msg === "string" ? record.msg : `TMAPI 请求失败 (${response.status})`;
+    : typeof record.msg === "string" ? record.msg : `1688 货源请求失败 (${response.status})`;
   if (!response.ok) throw new TmapiError(errorMessage(response.status, remoteMessage), response.status, requestId);
 
   const parsed = responseSchema.safeParse(payload);
@@ -258,7 +258,7 @@ async function tmapiRequest<S extends z.ZodTypeAny>(path: string, init: RequestI
     throw new TmapiError(errorMessage(businessCode, remoteMessage), businessCode, requestId);
   }
   const data = dataSchema.safeParse(parsed.data.data);
-  if (!data.success) throw new TmapiError("TMAPI 返回的数据结构已变化，请更新接口适配。", 502, requestId);
+  if (!data.success) throw new TmapiError("1688 货源返回的数据结构已变化，请更新接口适配。", 502, requestId);
   return data.data;
 }
 
@@ -323,7 +323,7 @@ export async function convertTmapiImageUrl(imageUrl: string): Promise<string> {
     body: JSON.stringify({ url: imageUrl, search_api_endpoint: "/search/image" }),
   }, new URLSearchParams(), convertedImageSchema);
   const converted = typeof data === "string" ? data : data.url ?? data.img_url ?? data.image_url;
-  if (!converted) throw new TmapiError("TMAPI 没有返回可用的图片搜索地址。", 502);
+  if (!converted) throw new TmapiError("1688 货源没有返回可用的图片搜索地址。", 502);
   return converted;
 }
 
@@ -349,8 +349,8 @@ export async function searchTmapiItemsByImage(
 }
 
 /**
- * 1688 关键词搜索货源（TMAPI /1688/search/items）。
- * 响应 items[] 与图搜结构一致（复用 imageSearchItemSchema），可直接接妙手采集。
+ * 1688 关键词搜索货源（1688 货源 /1688/search/items）。
+ * 响应 items[] 与图搜结构一致（复用 imageSearchItemSchema），可直接接采集。
  */
 export async function searchTmapiItemsByKeyword(
   keyword: string,

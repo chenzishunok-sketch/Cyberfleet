@@ -76,7 +76,7 @@ describe("TMAPI 1688 integration", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ message: "No API key found in request" }), { status: 401 }));
 
     await expect(getTmapiItemDetailById("648795280915")).rejects.toMatchObject({
-      message: "TMAPI Token 无效或未配置。",
+      message: "1688 货源 Token 无效或未配置。",
       statusCode: 401,
     } satisfies Partial<TmapiError>);
   });
@@ -127,7 +127,7 @@ describe("TMAPI 1688 integration", () => {
     }), { status: 422 }));
 
     await expect(convertTmapiImageUrl("https://images.example.com/missing.jpg")).rejects.toMatchObject({
-      message: "TMAPI 无法访问临时图片链接，已返回图片读取失败。",
+      message: "1688 货源无法访问临时图片链接，已返回图片读取失败。",
       statusCode: 422,
     } satisfies Partial<TmapiError>);
   });

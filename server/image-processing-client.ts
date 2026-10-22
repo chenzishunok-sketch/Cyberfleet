@@ -1,5 +1,5 @@
 /**
- * 妙手 ERP 图像处理客户端（6 端点）
+ * 采集上架 ERP 图像处理客户端（6 端点）
  * 契约来源：miaoshouerp-image-processing skill（miaoshou_image_processing.py，2026-08）。
  *
  * 6 端点：

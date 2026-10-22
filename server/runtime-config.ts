@@ -164,8 +164,8 @@ export function getWebSearchRuntimeConfig(): WebSearchRuntimeConfig {
 }
 
 /**
- * 出海匠 MCP 凭据（sk_live_ 开头的 API Key）。
- * 端点固定为出海匠 MCP Gateway：https://mcp.gateway.chuhaijiang.com/mcp（streamable HTTP）
+ * 日区选品 MCP 凭据（sk_live_ 开头的 API Key）。
+ * 端点固定为日区选品 MCP Gateway：https://mcp.gateway.chuhaijiang.com/mcp（streamable HTTP）
  */
 export function getChuhaijiangRuntimeConfig(): ChuhaijiangRuntimeConfig {
   const stored = storedSkillConfig("chuhaijiang");

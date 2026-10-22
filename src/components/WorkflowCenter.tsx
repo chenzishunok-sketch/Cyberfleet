@@ -91,13 +91,13 @@ const NODE_CATALOG: Omit<BlueprintNode, "id">[] = [
   { kind: "trigger", label: "手动发起", detail: "由你点击开始" },
   { kind: "trigger", label: "飞书消息", detail: "收到指定消息后启动" },
   { kind: "agent", label: "选品 Agent", detail: "识别货源并初筛商品" },
-  { kind: "agent", label: "采集 Agent", detail: "采集到妙手公共采集箱" },
+  { kind: "agent", label: "采集 Agent", detail: "采集到货源公共采集箱" },
   { kind: "agent", label: "上架 Agent", detail: "认领、编辑并发布商品" },
   { kind: "agent", label: "达人 BD Agent", detail: "筛选达人并执行建联" },
   { kind: "condition", label: "利润达标？", detail: "未达标时停止并提醒" },
   { kind: "approval", label: "人工审批", detail: "真实写入前需要确认" },
   { kind: "tool", label: "TikTok Shop", detail: "读取或写入店铺数据" },
-  { kind: "tool", label: "妙手 ERP", detail: "采集、认领和发布" },
+  { kind: "tool", label: "采集上架服务", detail: "采集、认领和发布" },
   { kind: "result", label: "保存 SKU 记录", detail: "记录编号、成本和利润" },
   { kind: "result", label: "飞书通知", detail: "发送结果和异常提醒" },
 ];
@@ -106,14 +106,14 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   {
     id: "supplier-publish",
     name: "1688 商品上架 TikTok",
-    description: "从货源读取、利润核算到妙手采集、上架和结果回查。",
+    description: "从货源读取、利润核算到采集、上架和结果回查。",
     category: "商品",
     launch: "product",
     nodes: [
       { id: "source", kind: "trigger", label: "1688 链接", detail: "手动提交货源" },
       { id: "sourcing", kind: "agent", label: "选品 Agent", detail: "读取货源和 SKU" },
       { id: "approve", kind: "approval", label: "上架审批", detail: "确认价格和商品资料" },
-      { id: "collect", kind: "agent", label: "采集 Agent", detail: "写入妙手" },
+      { id: "collect", kind: "agent", label: "采集 Agent", detail: "写入采集箱" },
       { id: "publish", kind: "agent", label: "上架 Agent", detail: "发布并回查" },
       { id: "record", kind: "result", label: "SKU 台账", detail: "保存商品对应关系" },
     ],
@@ -161,7 +161,7 @@ function shortDate(value: string): string {
 }
 
 function readableWarning(value: string): string {
-  return value.replace(/妙手 API \S+ 业务错误: /g, "妙手提示：").replace("应用无权限访问该接口", "当前妙手应用没有开通此能力");
+  return value.replace(/采集上架服务 API \S+ 业务错误: /g, "采集上架服务提示：").replace("应用无权限访问该接口", "当前采集上架服务没有开通此能力");
 }
 
 function readableError(value: string): string {
@@ -304,7 +304,7 @@ function ProductRunCard({ initialRun, onChange, compact = false }: RunCardProps<
   return (
     <article className={`workflow-run workflow-run--${run.status} ${compact ? "workflow-run--compact" : ""}`}>
       <RunHeader run={run} icon={<PackageCheck size={18} />} meta={run.shopName ? `${run.shopName}${run.shopSite ? ` · ${run.shopSite}` : ""}` : "目标店铺待确定"} />
-      <a className="workflow-source" href={run.sourceUrl} target="_blank" rel="noreferrer"><span>{run.sourceUrl}</span><ExternalLink size={13} /></a>
+      {run.sourceUrl && <a className="workflow-source" href={run.sourceUrl} target="_blank" rel="noreferrer"><span>{run.sourceUrl}</span><ExternalLink size={13} /></a>}
       <Progress steps={run.steps} />
       <RunMessages run={run} localError={error} />
 
@@ -330,7 +330,7 @@ function ProductRunCard({ initialRun, onChange, compact = false }: RunCardProps<
       <WorkflowHistory runId={run.id} />
 
       <div className="workflow-actions">
-        {run.status === "waiting_confirmation" && <button className="primary-button" disabled={Boolean(busy)} onClick={() => void act("approve", () => api.approveWorkflow(run.id))}>{busy === "approve" ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}{run.confirmationKind === "workflow_start" ? "审核并开始采集" : run.confirmationKind === "product_edit" ? "审核并保存到妙手" : `审核并发布到 ${run.shopName ?? "目标店铺"}`}</button>}
+        {run.status === "waiting_confirmation" && <button className="primary-button" disabled={Boolean(busy)} onClick={() => void act("approve", () => api.approveWorkflow(run.id))}>{busy === "approve" ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}{run.confirmationKind === "workflow_start" ? "审核并开始采集" : run.confirmationKind === "product_edit" ? "审核并保存到采集箱" : `审核并发布到 ${run.shopName ?? "目标店铺"}`}</button>}
         {run.status === "failed" && <button className="primary-button" disabled={Boolean(busy)} onClick={() => void act("retry", () => api.retryWorkflow(run.id))}>{busy === "retry" ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}重试失败步骤</button>}
         {run.status === "verification_pending" && <button className="primary-button" disabled={Boolean(busy)} onClick={() => void act("verify", () => api.verifyWorkflow(run.id))}>{busy === "verify" ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}重新核验发布结果</button>}
         {!publishSubmitted && !new Set<WorkflowStatus>(["completed", "cancelled"]).has(run.status) && <button className="secondary-button" disabled={Boolean(busy) || run.status === "running"} onClick={() => void act("cancel", () => api.cancelWorkflow(run.id))}><Ban size={15} />取消任务</button>}

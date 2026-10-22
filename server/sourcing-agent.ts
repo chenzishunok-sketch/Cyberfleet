@@ -255,7 +255,7 @@ export async function runSourcingSearch(intent: SourcingIntent): Promise<Sourcin
     }
     if (!searchImageUrl) {
       const lastError = errors.at(-1) ?? "图片转链失败";
-      throw new Error(`TMAPI 无法读取临时图片。系统已自动切换图片通道，最后一次失败原因：${lastError}`);
+      throw new Error(`1688 货源无法读取临时图片。系统已自动切换图片通道，最后一次失败原因：${lastError}`);
     }
   } else {
     searchImageUrl = isAlibabaImage(publicImageUrl) ? publicImageUrl : await convertTmapiImageUrl(publicImageUrl);
@@ -293,7 +293,7 @@ export async function runSourcingSearch(intent: SourcingIntent): Promise<Sourcin
       totalCount,
       candidates,
       costNote,
-      source: "TMAPI 1688 图片搜索·商品详情·采购价与供应商对比",
+      source: "1688 货源图片搜索·商品详情·采购价与供应商对比",
     },
   };
 }

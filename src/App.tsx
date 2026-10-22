@@ -160,7 +160,7 @@ export default function App() {
     await Promise.all([loadLlmProviders(), loadWorkspace()]);
   }, [loadLlmProviders, loadWorkspace]);
 
-  // 业务接口绑定保存/测试后：刷新 Skill 目录 + 健康状态（妙手/TMAPI/飞书等连接状态在 health 中）
+  // 业务接口绑定保存/测试后：刷新 Skill 目录 + 健康状态（采集上架/1688 货源/飞书等连接状态在 health 中）
   const refreshSkills = useCallback(async () => {
     await Promise.all([loadSkills(), loadWorkspace()]);
   }, [loadSkills, loadWorkspace]);

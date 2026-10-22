@@ -43,15 +43,15 @@ const BUILTIN_SKILLS: SkillDefinition[] = [
   },
   {
     id: "miaoshou",
-    name: "妙手 ERP",
-    description: "妙手 ERP 开放平台，提供 1688 货源采集、AI 类目匹配、产品翻译、一键上架 TikTok、采购管理等能力。",
+    name: "货源采集与上架",
+    description: "提供 1688 货源采集、AI 类目匹配、产品翻译、一键上架 TikTok、采购管理等能力。",
     icon: "PackagePlus",
     version: "1.0.0",
     category: "collection",
     configFields: [
-      { key: "appKey", label: "App Key", type: "text", required: true, placeholder: "妙手开放平台 App Key" },
-      { key: "appSecret", label: "App Secret", type: "password", required: true, placeholder: "妙手开放平台 App Secret" },
-      { key: "baseUrl", label: "API 地址", type: "url", required: false, placeholder: "https://openapi-erp.91miaoshou.com" },
+      { key: "appKey", label: "App Key", type: "text", required: true, placeholder: "采集上架服务 App Key" },
+      { key: "appSecret", label: "App Secret", type: "password", required: true, placeholder: "采集上架服务 App Secret" },
+      { key: "baseUrl", label: "API 地址", type: "url", required: false, placeholder: "采集上架服务 API 地址" },
     ],
     builtin: true,
     scenes: [
@@ -65,13 +65,13 @@ const BUILTIN_SKILLS: SkillDefinition[] = [
   {
     id: "tmapi-1688",
     name: "1688 货源数据",
-    description: "TMAPI 1688 商品数据，用于读取真实商品详情、SKU、采购价、库存、重量和供应商信息。",
+    description: "1688 商品数据，用于读取真实商品详情、SKU、采购价、库存、重量和供应商信息。",
     icon: "PackageSearch",
     version: "1.0.0",
     category: "collection",
     configFields: [
-      { key: "apiToken", label: "API Token", type: "password", required: true, placeholder: "TMAPI 控制台 API Token" },
-      { key: "baseUrl", label: "API 地址", type: "url", required: false, placeholder: "http://api.tmapi.top" },
+      { key: "apiToken", label: "API Token", type: "password", required: true, placeholder: "1688 货源数据 API Token" },
+      { key: "baseUrl", label: "API 地址", type: "url", required: false, placeholder: "1688 货源数据 API 地址" },
     ],
     builtin: true,
     scenes: ["item_detail", "item_detail_by_url", "supplier_product_snapshot"],
@@ -92,14 +92,14 @@ const BUILTIN_SKILLS: SkillDefinition[] = [
   },
   {
     id: "chuhaijiang",
-    name: "出海匠选品数据",
-    description: "出海匠 TikTok 美区电商数据（MCP），提供爆品搜索、商品详情、关联商品、达人、视频、店铺、广告、直播数据与 Amazon 交叉验证。",
+    name: "日区选品数据",
+    description: "TikTok 日区电商数据（MCP），提供爆品搜索、商品详情、关联商品、达人、视频、店铺、广告、直播数据与 Amazon 交叉验证。",
     icon: "Radar",
     version: "1.0.0",
     category: "analytics",
     configFields: [
       { key: "apiKey", label: "API Key", type: "password", required: true, placeholder: "sk_live_..." },
-      { key: "baseUrl", label: "MCP 地址", type: "url", required: false, placeholder: "https://mcp.gateway.chuhaijiang.com/mcp" },
+      { key: "baseUrl", label: "MCP 地址", type: "url", required: false, placeholder: "MCP 网关地址" },
     ],
     builtin: true,
     scenes: [
@@ -576,7 +576,7 @@ export async function getSkillTools(): Promise<unknown[]> {
         type: "function",
         function: {
           name: "miaoshou_query",
-          description: "查询妙手 ERP 数据，包括 1688 采集、商品上架、采购管理、库存查询等。",
+          description: "查询采集上架数据，包括 1688 采集、商品上架、采购管理、库存查询等。",
           parameters: {
             type: "object",
             properties: {
@@ -626,12 +626,12 @@ export async function getSkillTools(): Promise<unknown[]> {
     // MCP 工具加载失败不影响其他工具
   }
 
-  // 合并出海匠 MCP 只读工具
+  // 合并日区选品 MCP 只读工具
   try {
     const chuhaijiangTools = await getChuhaijiangTools();
     skillTools.push(...chuhaijiangTools);
   } catch {
-    // 出海匠工具加载失败不影响其他工具
+    // 日区选品工具加载失败不影响其他工具
   }
 
   cachedSkillTools = { at: now, value: skillTools };

@@ -22,7 +22,7 @@ class MiaoshouApiError extends Error {
     public readonly statusCode: number,
     public readonly responseBody: string,
   ) {
-    super(`妙手 API ${path} 返回 ${statusCode}: ${responseBody.slice(0, 200)}`);
+    super(`采集上架服务 ${path} 返回 ${statusCode}: ${responseBody.slice(0, 200)}`);
     this.name = "MiaoshouApiError";
   }
 }
@@ -66,7 +66,7 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1500;
 /** 频率超限需要等到下一个计时窗口，退避要明显长于普通重试 */
 const RATE_LIMIT_BACKOFF_MS = 3_000;
-/** 店铺列表按站点扇出时每批几个站点。妙手的 QPS 限制很紧，实测并发 3 个就会超限，只能是串行 */
+/** 店铺列表按站点扇出时每批几个站点。采集上架的 QPS 限制很紧，实测并发 3 个就会超限，只能是串行 */
 const SHOP_LIST_BATCH_SIZE = 1;
 const SHOP_LIST_BATCH_GAP_MS = 120;
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -104,7 +104,7 @@ async function miaoshouRequestOnce<T = unknown>(
   const text = await response.text();
   if (!contentType.includes("json") && text.trimStart().startsWith("<")) {
     console.error(`[miaoshou] ${path} 返回了 HTML 而非 JSON（前200字符）:`, text.slice(0, 200));
-    throw new Error(`妙手 API ${path} 返回了非 JSON 响应（可能是网关错误或服务不可用），请稍后重试。`);
+    throw new Error(`采集上架服务 ${path} 返回了非 JSON 响应（可能是网关错误或服务不可用），请稍后重试。`);
   }
 
   let json: MiaoshouResponse<T>;
@@ -112,18 +112,18 @@ async function miaoshouRequestOnce<T = unknown>(
     json = JSON.parse(text) as MiaoshouResponse<T>;
   } catch (parseErr) {
     console.error(`[miaoshou] ${path} JSON 解析失败（前200字符）:`, text.slice(0, 200));
-    throw new Error(`妙手 API ${path} 响应格式异常，请稍后重试。`);
+    throw new Error(`采集上架服务 ${path} 响应格式异常，请稍后重试。`);
   }
   // "没有符合条件的数据" 是正常空结果，不是错误
   const isEmptyResult = json.message === "没有符合条件的数据" && Array.isArray(json.data) && json.data.length === 0;
   if (!isEmptyResult && json.result !== "success" && json.code !== "success") {
-    throw new Error(`妙手 API ${path} 业务错误: ${json.message || json.code}`);
+    throw new Error(`采集上架服务 ${path} 业务错误: ${json.message || json.code}`);
   }
   return json;
 }
 
 /**
- * 带重试的妙手 API 请求。
+ * 带重试的采集上架服务 请求。
  * 当 API 返回 HTML 错误页或网络异常时，自动重试最多 3 次。
  */
 export async function miaoshouRequest<T = unknown>(
@@ -132,7 +132,7 @@ export async function miaoshouRequest<T = unknown>(
   options: { retry?: boolean } = {},
 ): Promise<MiaoshouResponse<T>> {
   if (!hasMiaoshouConfiguration()) {
-    throw new Error("妙手 API 尚未配置 AppKey / AppSecret。");
+    throw new Error("采集上架服务 尚未配置 AppKey / AppSecret。");
   }
 
   let lastError: Error | undefined;
@@ -144,7 +144,7 @@ export async function miaoshouRequest<T = unknown>(
       lastError = error instanceof Error ? error : new Error(String(error));
       const isHtmlError = lastError.message.includes("非 JSON 响应") || lastError.message.includes("响应格式异常");
       const isNetworkError = lastError.message.includes("fetch") || lastError instanceof TypeError;
-      // 频率超限虽然被妙手当"业务错误"返回，但它是暂时性的、可重试的。
+      // 频率超限虽然被采集上架当"业务错误"返回，但它是暂时性的、可重试的。
       // 旧实现把它归入"业务错误不重试"，于是调用方（尤其是轮询里的空 catch）
       // 会把"被限流"静默当成"没有数据"。
       const isRateLimited = lastError.message.includes("频率超限");
@@ -158,10 +158,10 @@ export async function miaoshouRequest<T = unknown>(
       }
     }
   }
-  throw lastError ?? new Error(`妙手 API ${path} 请求失败。`);
+  throw lastError ?? new Error(`采集上架服务 ${path} 请求失败。`);
 }
 
-// ─── 便捷方法：常用妙手接口 ─────────────────────────────────
+// ─── 便捷方法：常用采集上架接口 ─────────────────────────────────
 
 /** 通过货源链接采集货源 */
 export async function miaoshouFetchItem(sourceUrl: string, platform = "1688") {
@@ -237,7 +237,7 @@ export async function miaoshouGetCommonCollectBoxList(page = 1, pageSize = 20, s
     pageNo: page,
     pageSize,
     filter: {
-      // "collectSucess" 是妙手自己的枚举拼写（少一个 c），不要"纠正"成 collectSuccess
+      // "collectSucess" 是采集上架自己的枚举拼写（少一个 c），不要"纠正"成 collectSuccess
       tabPaneName: sourceItemIdKeyword ? "collectSucess" : "all",
       ...(sourceItemIdKeyword ? { sourceItemIdKeyword } : {}),
     },
@@ -265,7 +265,7 @@ export async function miaoshouGetTikTokCategoryTree(site: string) {
 
 /** AI匹配类目 */
 export async function miaoshouAiMatchCategory(itemIds: string[], shopIds: string[]) {
-  if (itemIds.length !== 1) throw new Error("妙手 AI 类目匹配目前每次只支持一个商品。");
+  if (itemIds.length !== 1) throw new Error("采集上架 AI 类目匹配目前每次只支持一个商品。");
   return miaoshouRequest("/open/v1/product/collect_box/tiktok/collect_box/ai_match_cid_by_shop_ids", {
     collectBoxDetailId: itemIds[0],
     shopIds: shopIds.map(Number),
@@ -362,7 +362,7 @@ export async function miaoshouResolveSite(platform = "tiktok"): Promise<string |
 }
 
 /**
- * 直接解析 TikTok OAuth shopId → 妙手 shopId。
+ * 直接解析 TikTok OAuth shopId → 采集上架 shopId。
  * 只请求单个站点（避免 site=all 的频率限制），按名称 + 站点双条件匹配。
  * 若传入的已经是数字 ID，则直接返回（幂等）。
  */
@@ -426,7 +426,7 @@ export async function miaoshouClaimToPlatform(detailIds: number[], platform: str
 /** 获取 TikTok 采集箱店铺模式商品详情 */
 export async function miaoshouGetTikTokShopCollectItemInfo(detailId: number, shopId: number) {
   if (!Number.isFinite(detailId) || !Number.isFinite(shopId)) {
-    throw new Error("妙手店铺或商品编号无效（可能是 TikTok OAuth 店铺未关联妙手店铺），无法读取采集箱商品详情。");
+    throw new Error("采集上架店铺或商品编号无效（可能是 TikTok OAuth 店铺未关联采集上架店铺），无法读取采集箱商品详情。");
   }
   return miaoshouRequest("/open/v1/product/collect_box/tiktok/collect_box/get_shop_collect_item_info", {
     detailId,
@@ -504,8 +504,8 @@ export async function miaoshouTranslateItem(itemId: string, shopId: number, targ
 
 /**
  * AI 生成商品标题和描述（notes）。
- * 使用本地 LLM 生成内容，然后保存回妙手采集箱，供发布时使用。
- * 不再依赖妙手 AI 资源包。
+ * 使用本地 LLM 生成内容，然后保存回采集上架采集箱，供发布时使用。
+ * 不再依赖采集上架 AI 资源包。
  */
 export async function miaoshouAiGenerateProductInfo(itemId: string, shopId: number, language?: string) {
   const detail = await miaoshouGetTikTokShopCollectItemInfo(Number(itemId), shopId);
@@ -514,7 +514,7 @@ export async function miaoshouAiGenerateProductInfo(itemId: string, shopId: numb
   const rawDesc = String(info?.description ?? info?.desc ?? "").trim();
   const attributes = info?.attributes ? JSON.stringify(info.attributes) : "";
 
-  if (!rawTitle && !rawDesc) throw new Error("妙手没有返回商品信息，无法生成标题和描述。");
+  if (!rawTitle && !rawDesc) throw new Error("采集上架没有返回商品信息，无法生成标题和描述。");
 
   const targetLanguage = (language ?? "en").trim().toLowerCase();
   const languageName = languageLabel(targetLanguage);
@@ -579,7 +579,7 @@ export async function miaoshouAiGenerateProductInfo(itemId: string, shopId: numb
     throw new Error(`LLM 生成内容无法解析：${result.content.slice(0, 100)}`);
   }
 
-  // 保存回妙手采集箱
+  // 保存回采集上架采集箱
   const ossMd5 = String(info?.ossMd5 ?? "");
   const updatedInfo = { ...info };
   if (generated.title) updatedInfo.title = generated.title;

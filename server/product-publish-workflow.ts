@@ -15,6 +15,7 @@ import {
   miaoshouFetchItem,
   miaoshouGetPublishRecords,
   miaoshouGetShopList,
+  miaoshouGetShopWarehouseList,
   miaoshouResolveSite,
   miaoshouGetTikTokCollectBoxList,
   miaoshouGetTikTokCategoryMetadata,
@@ -60,6 +61,7 @@ export interface ProductPublishWorkflowTools {
     packageDimensions?: { length: number; width: number; height: number };
     title?: string;
     description?: string;
+    site?: string;
   }): Promise<void>;
   diagnose(input: {
     platformDetailId: string;
@@ -88,7 +90,7 @@ const STEP_LABELS: Array<[WorkflowStep["id"], string]> = [
 ];
 
 const PUBLISH_VERIFICATION_TIMEOUT_MS = 24 * 60 * 60 * 1000;
-// 妙手采集是异步的，且对已采集过的链接会返回没有 payload 的 skip 行，等待要给足。
+// 采集上架服务采集是异步的，且对已采集过的链接会返回没有 payload 的 skip 行，等待要给足。
 const COLLECT_REUSE_WAIT_MS = 20_000;
 const COLLECT_WAIT_MS = 90_000;
 const COLLECT_POLL_INTERVAL_MS = 3_000;
@@ -220,13 +222,164 @@ async function ensureMiaoshouShopId(
   shopId: string | undefined,
   opts?: { region?: string; shopName?: string },
 ): Promise<string> {
-  if (!shopId) throw new Error("缺少店铺 ID，无法调用妙手 API。请重新选择店铺。");
+  if (!shopId) throw new Error("缺少店铺 ID，无法调用采集上架服务 API。请重新选择店铺。");
   if (isValidNumericShopId(shopId)) return shopId;
   const resolved = await resolveMiaoshouShopId(shopId, opts);
   if (isValidNumericShopId(resolved)) return resolved;
   throw new Error(
-    `缺少有效的妙手店铺 ID（当前值: ${shopId}）。请重新选择店铺，或检查 TikTok OAuth 与妙手的店铺是否已关联。`,
+    `缺少有效的采集上架服务店铺 ID（当前值: ${shopId}）。请重新选择店铺，或检查 TikTok OAuth 与采集上架服务的店铺是否已关联。`,
   );
+}
+
+/**
+ * 查询店铺在采集上架服务中的生效仓库，优先返回默认仓库，其次第一个生效仓库。
+ * 返回 undefined 表示该店铺没有可用仓库（此时保存/发布应让上游给出明确错误）。
+ */
+async function resolveShopWarehouseId(shopId: string): Promise<string | undefined> {
+  const response = await miaoshouGetShopWarehouseList([Number(shopId)]);
+  const shopWarehouses = asRecord(response.data)?.shopWarehouseList;
+  if (!Array.isArray(shopWarehouses)) return undefined;
+  for (const shopWarehouse of shopWarehouses) {
+    const warehouseList = asRecord(shopWarehouse)?.warehouseList;
+    if (!Array.isArray(warehouseList) || !warehouseList.length) continue;
+    const active: Record<string, unknown>[] = [];
+    for (const w of warehouseList) {
+      const record = asRecord(w);
+      if (record && String(record.warehouseEffectStatus ?? "1") === "1") active.push(record);
+    }
+    if (!active.length) continue;
+    const defaultWarehouse = active.find((w) => String(w.isDefault) === "1");
+    const chosen = defaultWarehouse ?? active[0];
+    const warehouseId = String(chosen.warehouseId ?? "").trim();
+    if (warehouseId) return warehouseId;
+  }
+  return undefined;
+}
+
+/**
+ * 给待保存商品详情补齐 SKU 的仓库库存映射（shopIdToWarehouseIdAndStockMap）。
+ * 认领到 TikTok 采集箱后该字段通常为空，但采集上架服务保存商品时要求「店铺仓库已选择」，
+ * 缺少会报「店铺【X】仓库未选择」。这里用店铺默认仓库 + 每个 SKU 当前库存填充。
+ */
+async function fillSkuWarehouseMap(item: Record<string, unknown>, resolvedShopId: string): Promise<void> {
+  const skuMap = asRecord(item.skuMap);
+  if (!skuMap) return;
+  const warehouseId = await resolveShopWarehouseId(resolvedShopId);
+  if (!warehouseId) return; // 店铺无仓库，交由上游报错，不静默填占位值
+  for (const skuValue of Object.values(skuMap)) {
+    const sku = asRecord(skuValue);
+    if (!sku || sku.isDelete === "1") continue;
+    const existing = asRecord(sku.shopIdToWarehouseIdAndStockMap);
+    const shopMap = existing && asRecord(existing[resolvedShopId]);
+    if (shopMap && Object.keys(shopMap).length) continue; // 已有仓库映射，不覆盖
+    const stock = Number(sku.stock) >= 0 ? String(sku.stock) : "0";
+    sku.shopIdToWarehouseIdAndStockMap = {
+      ...(existing ?? {}),
+      [resolvedShopId]: { [warehouseId]: stock },
+    };
+  }
+}
+
+/**
+ * 补齐类目的必填商品属性。
+ * enrich 步骤的 AI 属性匹配（ai_match_product_attribute）并不保证把每个必填属性都填上，
+ * 漏填的必填属性会直接导致保存报「产品属性【X】必填」。这里在保存前回读类目元数据，
+ * 找出 isMandatory 但商品属性里缺失、或已填但 valueId 为空的属性，用枚举值补上。
+ *
+ * 选择策略：优先找 valueNameAlias/name 与中文「中国/针织/棉」等常见值匹配的枚举项，
+ * 否则取第一个枚举值兜底。属性值结构参考 { id, name, valueNameAlias }。
+ */
+async function fillMissingMandatoryAttributes(
+  item: Record<string, unknown>,
+  resolvedShopId: string,
+  site: string,
+): Promise<{ filled: string[] }> {
+  const categoryId = String(item.cid ?? "").trim();
+  if (!categoryId) return { filled: [] };
+
+  let metadata: Record<string, unknown> | undefined;
+  try {
+    const response = await miaoshouGetTikTokCategoryMetadata(site, Number(categoryId), [Number(resolvedShopId)]);
+    metadata = asRecord(asRecord(response.data)?.categoryMetadata);
+  } catch {
+    return { filled: [] }; // 元数据拿不到时不阻塞保存，交由上游报错
+  }
+
+  const attrList = Array.isArray(metadata?.categoryProductAttrList) ? metadata.categoryProductAttrList : [];
+  if (!attrList.length) return { filled: [] };
+
+  const productAttributes = Array.isArray(item.productAttributes) ? item.productAttributes : [];
+  const existingByAttrId = new Map<string, Record<string, unknown>>();
+  for (const attribute of productAttributes) {
+    const record = asRecord(attribute);
+    const attrId = String(record?.attributeId ?? record?.attrId ?? "").trim();
+    if (attrId && record) existingByAttrId.set(attrId, record);
+  }
+
+  const filled: string[] = [];
+  for (const raw of attrList) {
+    const attribute = asRecord(raw);
+    if (!attribute) continue;
+    if (!isEnabledFlag(attribute.isMandatory) && !isEnabledFlag(attribute.mandatory)) continue;
+    const attrId = String(attribute.attrId ?? attribute.attributeId ?? "").trim();
+    if (!attrId) continue;
+    const nameAlias = String(attribute.attributeNameAlias ?? attribute.attributeName ?? attribute.name ?? "").trim();
+
+    const existing = existingByAttrId.get(attrId);
+    if (existing) {
+      // 已填属性，但 valueId 为 null（AI 只填了文本没落到枚举 ID）时，补上 valueId
+      const values = Array.isArray(existing.attributeValues) ? existing.attributeValues : [];
+      const needsValueId = values.some((v) => {
+        const rec = asRecord(v);
+        return rec && !String(rec.valueId ?? "").trim();
+      });
+      if (!needsValueId) continue;
+    }
+
+    const valueList = Array.isArray(attribute.valueList) ? attribute.valueList
+      : Array.isArray(attribute.values) ? attribute.values
+        : Array.isArray(attribute.attributeValueList) ? attribute.attributeValueList : [];
+    if (!valueList.length) continue;
+
+    const pickValue = (): Record<string, unknown> | undefined => {
+      const candidates = valueList.map(asRecord).filter((v): v is Record<string, unknown> => Boolean(v));
+      if (!candidates.length) return undefined;
+      const idOf = (rec: Record<string, unknown>) => String(rec.id ?? rec.valueId ?? "").trim();
+      const nameOf = (rec: Record<string, unknown>) =>
+        [rec.valueNameAlias, rec.name].map((s) => String(s ?? "")).find((s) => s.trim());
+      // 按中文名匹配常见取值
+      const preferred = ["中国", "针织", "棉", "编织", "ポリアミド", "ナイロン"];
+      for (const keyword of preferred) {
+        const hit = candidates.find((c) => nameOf(c)?.includes(keyword));
+        if (hit && idOf(hit)) return hit;
+      }
+      return candidates.find((c) => idOf(c));
+    };
+
+    const chosen = pickValue();
+    if (!chosen) continue;
+    const chosenId = String(chosen.id ?? chosen.valueId ?? "").trim();
+    const chosenName = [chosen.valueNameAlias, chosen.name].map((s) => String(s ?? "")).find((s) => s.trim()) ?? "";
+
+    if (existing) {
+      const values = Array.isArray(existing.attributeValues) ? existing.attributeValues : [];
+      for (const value of values) {
+        const rec = asRecord(value);
+        if (rec && !String(rec.valueId ?? "").trim()) rec.valueId = chosenId;
+      }
+    } else {
+      productAttributes.push({
+        attributeId: attrId,
+        attributeName: nameAlias || String(attribute.attributeName ?? attribute.name ?? ""),
+        attributeValues: [{ valueName: chosenName, valueId: chosenId }],
+      });
+      existingByAttrId.set(attrId, asRecord(productAttributes[productAttributes.length - 1])!);
+    }
+    filled.push(nameAlias || attrId);
+  }
+
+  if (filled.length) item.productAttributes = productAttributes;
+  return { filled };
 }
 
 export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
@@ -235,12 +388,12 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     const seenIds = new Set<string>();
     const miaoshouIdByOAuthId = new Map<string, string>();
 
-    // 1) 从妙手拉取店铺列表（优先 site=all，失败则回退到按 region 单独请求）
+    // 1) 从采集上架服务拉取店铺列表（优先 site=all，失败则回退到按 region 单独请求）
     let miaoshouShopsList: Array<Record<string, unknown>> = [];
     if (hasMiaoshouConfiguration()) {
       // 只查 OAuth 已授权店铺所在的站点——一个店铺一个请求。
       // 之前这里用 site=all 扇出全部站点，日本单店账号会连打 9 个请求，
-      // 直接撞上妙手「账户接口每秒请求频率超限」，要靠 3s/6s 退避才恢复，反而更慢。
+      // 直接撞上采集上架服务「账户接口每秒请求频率超限」，要靠 3s/6s 退避才恢复，反而更慢。
       try {
         const stored = await readStoredAuthorization();
         const regions = new Set<string>();
@@ -262,7 +415,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
           }
         }
       } catch (err) {
-        console.warn(`[listShops] 妙手店铺获取失败:`, (err as Error).message);
+        console.warn(`[listShops] 采集上架服务店铺获取失败:`, (err as Error).message);
       }
     }
 
@@ -275,8 +428,8 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
           if (!oauthId || seenIds.has(oauthId)) continue;
           const region = (shop.region || "").toUpperCase();
           const name = shop.name || "";
-          // 店铺名称是唯一可靠的身份标识，必须先在全部妙手店铺中按名称精确匹配。
-          // 旧实现把「名称匹配」和「站点匹配」写成 OR 并 break，妙手返回 [Mizora JP, Cashio]
+          // 店铺名称是唯一可靠的身份标识，必须先在全部采集上架服务店铺中按名称精确匹配。
+          // 旧实现把「名称匹配」和「站点匹配」写成 OR 并 break，采集上架服务返回 [Mizora JP, Cashio]
           // 时第一个条目靠 site=JP 命中就直接返回，导致 Cashio 被解析成 Mizora JP —— 会发错店铺。
           let miaoshouShopId: string | undefined;
           if (name) {
@@ -286,7 +439,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
             });
             if (byName) miaoshouShopId = String(byName.shopId ?? "");
           }
-          // 名称对不上时，只有当该站点下只有唯一一家妙手店铺才允许按站点兜底；
+          // 名称对不上时，只有当该站点下只有唯一一家采集上架服务店铺才允许按站点兜底；
           // 多家店时宁可留空让用户显式选择，也不要猜错店铺。
           if (!miaoshouShopId && region) {
             const onSite = miaoshouShopsList.filter((ms) => String(ms.site ?? "").toUpperCase() === region);
@@ -310,7 +463,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
       console.warn(`[listShops] TikTok OAuth 读取失败:`, (err as Error).message);
     }
 
-    // 3) 妙手独有的店铺（OAuth 中没有的）也加入列表
+    // 3) 采集上架服务独有的店铺（OAuth 中没有的）也加入列表
     const miaoshouIdsFromOAuth = new Set(miaoshouIdByOAuthId.values());
     for (const item of miaoshouShopsList) {
       const shop = asRecord(item);
@@ -336,7 +489,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
   },
 
   async collect(sourceUrl) {
-    // 妙手不会为已采集过的链接创建副本：重复调用 fetch_item 只会得到一条
+    // 采集上架服务不会为已采集过的链接创建副本：重复调用 fetch_item 只会得到一条
     // status="skip"、reason="产品已经采集过。" 且**不含任何商品数据**的行，
     // 认领它会报「存在未采集成功的产品」，看起来像货源被封，其实是自造的重复行。
     // 所以先按货源编号复用已有的 success 记录，确实没有时才真正采集。
@@ -350,14 +503,14 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     const response = await miaoshouFetchItem(sourceUrl, "1688");
     const map = asRecord(asRecord(response.data)?.sourceItemIdAndDetailIdMap) ?? {};
     const [sourceItemId] = Object.keys(map);
-    if (!sourceItemId) throw new Error("妙手没有返回货源商品编号，请检查 1688 链接是否有效。");
+    if (!sourceItemId) throw new Error("采集上架服务没有返回货源商品编号，请检查 1688 链接是否有效。");
     // fetch_item 可能映射到 skip/处理中记录，必须等公共采集箱出现同货源的 success 记录。
     const waitResult = await miaoshouWaitForCollection([sourceItemId], COLLECT_WAIT_MS, COLLECT_POLL_INTERVAL_MS);
     const commonDetailId = waitResult.find((item) => item.sourceItemId === sourceItemId && item.detailId)?.detailId;
     if (!commonDetailId) {
       throw new Error(
-        "采集结果不可读：妙手可能返回了一条重复采集产生的 skip 记录（不含商品数据）。" +
-        "重复重试不会修复它，反而会继续消耗采集额度；请到妙手后台确认该货源状态，或换一个尚未采集过的链接。",
+        "采集结果不可读：采集上架服务可能返回了一条重复采集产生的 skip 记录（不含商品数据）。" +
+        "重复重试不会修复它，反而会继续消耗采集额度；请到采集上架服务后台确认该货源状态，或换一个尚未采集过的链接。",
       );
     }
     return { sourceItemId, commonDetailId };
@@ -370,17 +523,17 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     const tiktokMapEntry = Object.entries(platformMap ?? {}).find(([key]) => /tiktok|^tk$/i.test(key));
     const tiktokMap = asRecord(tiktokMapEntry?.[1]);
     const platformDetailId = String(tiktokMap?.[commonDetailId] ?? "");
-    if (!platformDetailId) throw new Error("商品已提交认领，但妙手没有返回 TikTok 采集箱编号。请查询采集箱后重试。");
+    if (!platformDetailId) throw new Error("商品已提交认领，但采集上架服务没有返回 TikTok 采集箱编号。请查询采集箱后重试。");
     return { platformDetailId };
   },
 
   async claimToShop(platformDetailId, shopId, opts) {
     // 必须把 region / shopName 传下去：TikTok OAuth 的 shopId 是 cipher（ROW_...），
-    // 只能靠名称或站点才能解析成妙手数字店铺 ID。漏传时 resolveMiaoshouShopId 会退化到
+    // 只能靠名称或站点才能解析成采集上架服务数字店铺 ID。漏传时 resolveMiaoshouShopId 会退化到
     // 站点优先级列表逐个试探，既慢又可能解析失败。
     const numericShopId = Number(await ensureMiaoshouShopId(shopId, opts));
     const response = await miaoshouClaimToShop([Number(platformDetailId)], [numericShopId]);
-    if (!successfulResponse(response)) throw new Error("妙手未能把商品关联到目标店铺。");
+    if (!successfulResponse(response)) throw new Error("采集上架服务未能把商品关联到目标店铺。");
   },
 
   async enrich({ platformDetailId, shopId, targetLanguage, shopName, region }) {
@@ -410,10 +563,10 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
         warnings.push(`属性自动匹配失败：${errorMessage(error)}`);
       }
     } else {
-      warnings.push("妙手没有返回类目编号，属性自动匹配已跳过；发布前请留意类目是否完整。");
+      warnings.push("采集上架服务没有返回类目编号，属性自动匹配已跳过；发布前请留意类目是否完整。");
     }
 
-    // 妙手限频 1 次/秒，写接口之间保持间隔
+    // 采集上架服务限频 1 次/秒，写接口之间保持间隔
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     try {
       await miaoshouTranslateItem(platformDetailId, Number(resolvedShopId), targetLanguage);
@@ -436,7 +589,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     const response = await miaoshouGetTikTokShopCollectItemInfo(Number(platformDetailId), Number(resolvedShopId));
     const data = asRecord(response.data);
     const item = asRecord(data?.shopCollectItemInfo);
-    if (!item) throw new Error("妙手没有返回完整商品详情，无法生成编辑预览。");
+    if (!item) throw new Error("采集上架服务没有返回完整商品详情，无法生成编辑预览。");
     const skuMap = asRecord(item.skuMap) ?? {};
     const activeEntries = Object.entries(skuMap).filter(([, value]) => {
       const sku = asRecord(value);
@@ -488,13 +641,13 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     return { skuCount: activeSkus.length, changes, missingPackageDimensions };
   },
 
-  async saveEdit({ platformDetailId, shopId, publishPrice, skuPrices, selectedSkuKeys, packageDimensions, title, description }) {
+  async saveEdit({ platformDetailId, shopId, publishPrice, skuPrices, selectedSkuKeys, packageDimensions, title, description, site }) {
     const resolvedShopId = await ensureMiaoshouShopId(shopId);
     const response = await miaoshouGetTikTokShopCollectItemInfo(Number(platformDetailId), Number(resolvedShopId));
     const data = asRecord(response.data);
     const original = asRecord(data?.shopCollectItemInfo);
     const ossMd5 = String(data?.ossMd5 ?? "").trim();
-    if (!original || !ossMd5) throw new Error("妙手没有返回最新完整商品详情或 ossMd5，已停止保存。");
+    if (!original || !ossMd5) throw new Error("采集上架服务没有返回最新完整商品详情或 ossMd5，已停止保存。");
     const item = structuredClone(original);
     const skuMap = asRecord(item.skuMap) ?? {};
     const selectedSet = selectedSkuKeys ? new Set(selectedSkuKeys) : undefined;
@@ -527,6 +680,12 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
       delete item.sizeChart;
       delete item.sizeChartType;
     }
+    // 仓库库存映射：认领到 TikTok 采集箱后，SKU 的 shopIdToWarehouseIdAndStockMap 通常是空的，
+    // 而采集上架服务保存商品时要求「店铺仓库已选择」。这里查询店铺生效仓库并选默认仓库，
+    // 给每个待保存 SKU 填上仓库库存映射，否则保存会报「仓库未选择」。
+    await fillSkuWarehouseMap(item, resolvedShopId);
+    // 补齐类目必填商品属性：AI 属性匹配可能漏掉必填项（如「织造方法」），漏填会导致保存报错。
+    await fillMissingMandatoryAttributes(item, resolvedShopId, site ?? PRIMARY_SITE);
     await miaoshouSaveTikTokShopCollectItemInfo(Number(platformDetailId), Number(resolvedShopId), ossMd5, item);
   },
 
@@ -535,7 +694,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     const response = await miaoshouGetTikTokShopCollectItemInfo(Number(platformDetailId), Number(resolvedShopId));
     const data = asRecord(response.data);
     const item = asRecord(data?.shopCollectItemInfo);
-    if (!item) throw new Error("妙手没有返回该商品的店铺详情，无法做发布前检查。");
+    if (!item) throw new Error("采集上架服务没有返回该商品的店铺详情，无法做发布前检查。");
 
     const blockingIssues: string[] = [];
     const warnings: string[] = [];
@@ -560,7 +719,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
       return !shopWarehouses || Object.keys(shopWarehouses).length === 0;
     })) blockingIssues.push("存在未配置仓库库存的 SKU。");
     if (!["0", "1"].includes(String(item.isCodOpen ?? ""))) warnings.push("货到付款设置不完整。");
-    if (!String(item.deliveryOptionSetType ?? "").trim()) warnings.push("妙手以空值回传店铺默认发货方式；发布时将沿用店铺设置。");
+    if (!String(item.deliveryOptionSetType ?? "").trim()) warnings.push("采集上架服务以空值回传店铺默认发货方式；发布时将沿用店铺设置。");
     const dimensionsMissing = !positiveNumber(item.packageLength) || !positiveNumber(item.packageWidth) || !positiveNumber(item.packageHeight);
     if (dimensionsMissing) blockingIssues.push("包裹长、宽、高未填写。");
 
@@ -604,7 +763,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     const detailIds = [Number(platformDetailId)];
     const shopIds = [Number(resolvedShopId)];
     const published = await miaoshouPublishToTikTok(detailIds, shopIds);
-    if (!successfulResponse(published)) throw new Error("妙手没有接受商品发布请求。");
+    if (!successfulResponse(published)) throw new Error("采集上架服务没有接受商品发布请求。");
     return {
       requestId: findValue(published, new Set(["request_id", "requestId", "task_id", "taskId"])),
     };
@@ -617,10 +776,10 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
       const matched = serialized.includes(platformDetailId) && serialized.includes(shopId);
       if (matched) {
         const linked = await findRecentTikTokProduct(workflowCreatedAt ?? publishedAfter).catch(() => undefined);
-        return { matched: true, summary: linked ? `已经在 TikTok 店铺找到并关联商品 ${linked.productId}。` : "已经在妙手发布记录中找到对应商品和店铺。", ...linked };
+        return { matched: true, summary: linked ? `已经在 TikTok 店铺找到并关联商品 ${linked.productId}。` : "已经在采集上架服务发布记录中找到对应商品和店铺。", ...linked };
       }
     } catch {
-      // 某些妙手应用没有发布记录权限，继续直接回读 TikTok 店铺。
+      // 某些采集上架服务应用没有发布记录权限，继续直接回读 TikTok 店铺。
     }
 
     // 发布记录权限未开通时，采集箱的状态分组仍可以提供明确进度。
@@ -629,14 +788,14 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
     if (includesCollectBoxItem(pendingResponse, platformDetailId)) {
       return {
         matched: false,
-        summary: "妙手已接受发布请求，但该商品目前仍在“未发布”列表中，还没有上架到 TikTok。",
+        summary: "采集上架服务已接受发布请求，但该商品目前仍在“未发布”列表中，还没有上架到 TikTok。",
       };
     }
     await new Promise((resolve) => setTimeout(resolve, 1100));
     const publishedResponse = await miaoshouGetTikTokCollectBoxList(1, 100, "published");
     if (includesCollectBoxItem(publishedResponse, platformDetailId)) {
       const linked = await findRecentTikTokProduct(workflowCreatedAt ?? publishedAfter).catch(() => undefined);
-      return { matched: true, summary: linked ? `已经在妙手“已发布”列表和 TikTok 店铺找到商品 ${linked.productId}。` : "已经在妙手“已发布”列表中找到该商品。", ...linked };
+      return { matched: true, summary: linked ? `已经在采集上架服务“已发布”列表和 TikTok 店铺找到商品 ${linked.productId}。` : "已经在采集上架服务“已发布”列表中找到该商品。", ...linked };
     }
 
     const client = await getAuthorizedTikTokClient();
@@ -667,7 +826,7 @@ export const realProductPublishWorkflowTools: ProductPublishWorkflowTools = {
         }
       : {
           matched: false,
-          summary: "妙手已接受发布请求，但 TikTok 店铺中还没有出现本次提交后的新商品，可以稍后重新核验。",
+          summary: "采集上架服务已接受发布请求，但 TikTok 店铺中还没有出现本次提交后的新商品，可以稍后重新核验。",
         };
   },
 };
@@ -690,7 +849,9 @@ export class ProductPublishWorkflowEngine {
   }
 
   async create(input: {
-    sourceUrl: string;
+    sourceUrl?: string;
+    /** 已认领到 TikTok 采集箱的商品编号；聊天里直接说「发布」时复用采集箱最近的商品 */
+    platformDetailId?: string;
     shopId?: string;
     publishPrice?: number;
     currency?: string;
@@ -698,14 +859,19 @@ export class ProductPublishWorkflowEngine {
     title?: string;
     description?: string;
   }): Promise<ProductPublishWorkflowRun> {
-    let url: URL;
-    try {
-      url = new URL(input.sourceUrl);
-    } catch {
-      throw new Error("请输入完整的 1688 商品链接。");
+    if (!input.sourceUrl && !input.platformDetailId) {
+      throw new Error("请提供 1688 商品链接，或先在聊天里完成采集和认领。");
     }
-    if (url.protocol !== "https:" || !/(^|\.)1688\.com$/i.test(url.hostname)) {
-      throw new Error("当前发布流程只接受 1688 的 HTTPS 商品链接。");
+    let url: URL | undefined;
+    if (input.sourceUrl) {
+      try {
+        url = new URL(input.sourceUrl);
+      } catch {
+        throw new Error("请输入完整的 1688 商品链接。");
+      }
+      if (url.protocol !== "https:" || !/(^|\.)1688\.com$/i.test(url.hostname)) {
+        throw new Error("当前发布流程只接受 1688 的 HTTPS 商品链接。");
+      }
     }
     if (input.publishPrice !== undefined && (!Number.isFinite(input.publishPrice) || input.publishPrice <= 0)) {
       throw new Error("发布售价必须是大于 0 的数字。");
@@ -717,9 +883,10 @@ export class ProductPublishWorkflowEngine {
     const run: ProductPublishWorkflowRun = {
       id: randomUUID(),
       type: "product_publish",
-      title: "1688 商品发布到 TikTok",
+      title: input.platformDetailId && !input.sourceUrl ? "TikTok 采集箱商品发布" : "1688 商品发布到 TikTok",
       status: "draft",
-      sourceUrl: url.toString(),
+      ...(url ? { sourceUrl: url.toString() } : {}),
+      ...(input.platformDetailId ? { platformDetailId: input.platformDetailId } : {}),
       targetPlatform: "tiktok",
       ...(input.shopId ? { shopId: input.shopId } : {}),
       ...(input.publishPrice !== undefined ? { publishPrice: input.publishPrice } : {}),
@@ -748,7 +915,7 @@ export class ProductPublishWorkflowEngine {
         ...run,
         status: "waiting_confirmation",
         confirmationKind: "workflow_start",
-        summary: "确认后将开始采集1688商品、认领到妙手TikTok采集箱并补全商品资料；不会直接发布到TikTok。",
+        summary: "确认后将开始采集1688商品、认领到采集上架服务TikTok采集箱并补全商品资料；不会直接发布到TikTok。",
       }, "prepare", { status: "pending", detail: "等待审核后开始任务" });
     }));
   }
@@ -857,6 +1024,7 @@ export class ProductPublishWorkflowEngine {
             packageDimensions: run.packageDimensions,
             title: run.requestedTitle,
             description: run.requestedDescription,
+            site: run.shopSite,
           });
           return this.update(id, (current) => patchStep({
             ...current, status: "draft", confirmationKind: undefined, requiredInput: undefined,
@@ -902,7 +1070,7 @@ export class ProductPublishWorkflowEngine {
           publishRequestId: result.requestId,
         }, "publish", {
           status: "completed",
-          detail: "妙手已接受发布请求",
+          detail: "采集上架服务已接受发布请求",
           completedAt: new Date().toISOString(),
         }));
       } catch (error) {
@@ -1038,9 +1206,17 @@ export class ProductPublishWorkflowEngine {
       }
 
       currentStep = "collect";
-      if (!run.commonDetailId) {
+      // 从聊天「发布」意图创建的任务自带已认领的采集箱商品：直接复用，跳过采集
+      if (run.platformDetailId && run.steps.find((step) => step.id === "collect")?.status !== "completed") {
+        run = await this.update(id, (current) => patchStep(current, "collect", {
+          status: "completed",
+          detail: `复用 TikTok 采集箱商品 ${current.platformDetailId}，跳过采集`,
+          completedAt: new Date().toISOString(),
+        }));
+      }
+      if (!run.commonDetailId && !run.platformDetailId) {
         run = await this.startStep(id, "collect", "正在采集商品并等待进入公共采集箱");
-        const collected = await this.tools.collect(run.sourceUrl);
+        const collected = await this.tools.collect(run.sourceUrl!);
         run = await this.update(id, (current) => patchStep({
           ...current,
           sourceItemId: collected.sourceItemId,
@@ -1096,7 +1272,7 @@ export class ProductPublishWorkflowEngine {
         run = await this.update(id, (current) => patchStep({
           ...current,
           categoryId: enriched.categoryId,
-          // 解析成功的妙手数字店铺 ID 回写任务，后续定价/发布步骤直接使用，避免重复解析或 NaN
+          // 解析成功的采集上架服务数字店铺 ID 回写任务，后续定价/发布步骤直接使用，避免重复解析或 NaN
           miaoshouShopId: enriched.resolvedShopId ?? current.miaoshouShopId,
           warnings: [...current.warnings, ...enriched.warnings],
         }, "enrich", {
@@ -1139,7 +1315,7 @@ export class ProductPublishWorkflowEngine {
             status: "waiting_input",
             requiredInput: {
               kind: "product_edit",
-              prompt: "妙手要求填写实际包裹尺寸。请补充长、宽、高后再生成编辑预览。",
+              prompt: "采集上架服务要求填写实际包裹尺寸。请补充长、宽、高后再生成编辑预览。",
               missing: ["packageDimensions"],
             },
             editPreview: undefined,
@@ -1151,7 +1327,7 @@ export class ProductPublishWorkflowEngine {
           status: "waiting_confirmation",
           confirmationKind: "product_edit",
           editPreview: preview,
-          summary: `已生成 ${preview.skuCount} 个 SKU 的编辑预览。确认后才会把完整商品详情保存到妙手。`,
+          summary: `已生成 ${preview.skuCount} 个 SKU 的编辑预览。确认后才会把完整商品详情保存到采集上架服务。`,
         }, "edit", { status: "pending", detail: "等待确认保存商品编辑", startedAt: undefined }));
       }
 
@@ -1184,7 +1360,7 @@ export class ProductPublishWorkflowEngine {
             summary: "商品已经采集并认领，但发布必填信息还不完整。补全后可以从这里重新检查。",
             requiredInput: {
               kind: "product_data",
-              prompt: "请先在妙手 TikTok 采集箱补全以下信息。",
+              prompt: "请先在采集上架服务 TikTok 采集箱补全以下信息。",
               issues: readiness.blockingIssues,
             },
           }));
@@ -1214,7 +1390,7 @@ export class ProductPublishWorkflowEngine {
     const shopId = run.shopId;
     run = await this.update(id, (current) => patchStep({ ...current, status: "running" }, "verify", {
       status: "running",
-      detail: "正在查询妙手发布记录",
+      detail: "正在查询采集上架服务发布记录",
       startedAt: new Date().toISOString(),
       error: undefined,
     }));
@@ -1226,7 +1402,7 @@ export class ProductPublishWorkflowEngine {
         ...current,
         status: verification.matched ? "completed" : expired ? "failed" : "verification_pending",
         summary: expired
-          ? "发布请求已超过 24 小时仍未核验到上架结果。任务已停止自动等待，可以检查妙手失败原因后重试。"
+          ? "发布请求已超过 24 小时仍未核验到上架结果。任务已停止自动等待，可以检查采集上架服务失败原因后重试。"
           : verification.summary,
         error: expired ? "发布结果核验超时" : undefined,
         tiktokProductId: verification.productId ?? current.tiktokProductId,
@@ -1292,7 +1468,8 @@ export class ProductPublishWorkflowEngine {
 export const productPublishWorkflowEngine = new ProductPublishWorkflowEngine();
 
 export async function startProductPublishWorkflow(input: {
-  sourceUrl: string;
+  sourceUrl?: string;
+  platformDetailId?: string;
   shopId?: string;
   publishPrice?: number;
   currency?: string;
@@ -1302,4 +1479,26 @@ export async function startProductPublishWorkflow(input: {
 }): Promise<ProductPublishWorkflowRun> {
   const run = await productPublishWorkflowEngine.create(input);
   return productPublishWorkflowEngine.requestStartApproval(run.id);
+}
+
+/**
+ * 聊天「发布到 TikTok 店铺」入口：复用 TikTok 采集箱里最近一件已认领、未发布的商品
+ * 创建上架任务（跳过采集和认领），审核卡交给用户确认后走补全 → 保存 → 发布 → 核验。
+ */
+export async function startPublishFromCollectBox(): Promise<ProductPublishWorkflowRun> {
+  const response = await miaoshouGetTikTokCollectBoxList(1, 20, "notPublished");
+  const data = asRecord(asRecord(response)?.data);
+  const list = Array.isArray(data?.detailList) ? data.detailList : Array.isArray(data?.list) ? data.list : [];
+  const latest = list
+    .map((item) => asRecord(item))
+    .find((record): record is Record<string, unknown> => {
+      if (!record) return false;
+      const detailId = String(record.collectBoxDetailId ?? record.detailId ?? "").trim();
+      return Boolean(detailId) && detailId !== "0";
+    });
+  const platformDetailId = latest ? String(latest.collectBoxDetailId ?? latest.detailId ?? "").trim() : "";
+  if (!platformDetailId) {
+    throw new Error("TikTok 采集箱里没有已认领、未发布的商品。请先粘贴 1688 链接完成采集和认领，或直接在采集上架服务里认领。");
+  }
+  return startProductPublishWorkflow({ platformDetailId });
 }

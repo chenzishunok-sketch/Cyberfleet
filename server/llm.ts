@@ -126,7 +126,7 @@ const tools = [
     type: "function",
     function: {
       name: "start_supplier_publish_workflow",
-      description: "创建从 1688 采集、妙手编辑到 TikTok 发布的持久化任务。只有用户明确要求上架时使用；任务会先返回审核卡片。",
+      description: "创建从 1688 采集、采集编辑到 TikTok 发布的持久化任务。只有用户明确要求上架时使用；任务会先返回审核卡片。",
       parameters: {
         type: "object",
         properties: {

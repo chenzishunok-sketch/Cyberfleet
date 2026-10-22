@@ -6,8 +6,10 @@ const miaoshou = vi.hoisted(() => ({
   saveShopDetail: vi.fn(),
   waitForCollection: vi.fn(),
   getShopList: vi.fn(),
+  getShopWarehouseList: vi.fn(),
   claimToShop: vi.fn(),
   resolveMiaoshouShopId: vi.fn(),
+  getTikTokCategoryMetadata: vi.fn(),
 }));
 
 const tiktokAuth = vi.hoisted(() => ({
@@ -29,8 +31,9 @@ vi.mock("../server/miaoshou-client.ts", () => ({
   miaoshouFetchItem: miaoshou.fetchItem,
   miaoshouGetPublishRecords: vi.fn(),
   miaoshouGetShopList: miaoshou.getShopList,
+  miaoshouGetShopWarehouseList: miaoshou.getShopWarehouseList,
   miaoshouGetTikTokCollectBoxList: vi.fn(),
-  miaoshouGetTikTokCategoryMetadata: vi.fn(),
+  miaoshouGetTikTokCategoryMetadata: miaoshou.getTikTokCategoryMetadata,
   miaoshouGetTikTokShopCollectItemInfo: miaoshou.getShopDetail,
   miaoshouPublishToTikTok: vi.fn(),
   miaoshouSaveTikTokShopCollectItemInfo: miaoshou.saveShopDetail,
@@ -44,6 +47,9 @@ import { realProductPublishWorkflowTools } from "../server/product-publish-workf
 describe("Real product publishing tools", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 默认：店铺没有仓库（fillSkuWarehouseMap 会跳过，不填充映射），
+    // 需要验证仓库填充的用例再单独 mock。
+    miaoshou.getShopWarehouseList.mockResolvedValue({ data: { shopWarehouseList: [] } });
   });
 
   it("uses the verified successful collection instead of the raw fetch mapping", async () => {
@@ -174,6 +180,122 @@ describe("Real product publishing tools", () => {
     })).rejects.toThrow("实际包裹长、宽、高");
     expect(miaoshou.saveShopDetail).not.toHaveBeenCalled();
   });
+
+  it("fills the default warehouse map on every active SKU before saving", async () => {
+    miaoshou.getShopDetail.mockResolvedValue({
+      data: {
+        ossMd5: "latest-md5",
+        shopCollectItemInfo: {
+          title: "Product",
+          deliveryOptionSetType: "default",
+          packageLength: 10,
+          packageWidth: 8,
+          packageHeight: 4,
+          skuMap: {
+            active: { price: 14.9, priceIncludeVat: 14.9, isDelete: "0", weight: 0.4, stock: 1853 },
+            deleted: { price: 9.9, priceIncludeVat: 9.9, isDelete: "1", weight: 0.4, stock: 0 },
+          },
+        },
+      },
+    });
+    miaoshou.getShopWarehouseList.mockResolvedValue({
+      data: {
+        shopWarehouseList: [{
+          shopId: "16047893",
+          warehouseList: [
+            { warehouseId: "7517970149146117906", warehouseName: "The Chinese mainland Pickup Warehouse", warehouseEffectStatus: "1", isDefault: "1" },
+            { warehouseId: "7563225442526938887", warehouseName: "YDH", warehouseEffectStatus: "1", isDefault: "0" },
+          ],
+        }],
+      },
+    });
+    miaoshou.saveShopDetail.mockResolvedValue({ result: "success" });
+
+    await realProductPublishWorkflowTools.saveEdit?.({
+      platformDetailId: "3228311508",
+      shopId: "16047893",
+      publishPrice: 99,
+    });
+
+    const savedItem = miaoshou.saveShopDetail.mock.calls[0][3];
+    // 默认仓库 7517970149146117906 被选中，active SKU 填了仓库映射 + 当前库存
+    expect(savedItem.skuMap.active.shopIdToWarehouseIdAndStockMap).toEqual({
+      "16047893": { "7517970149146117906": "1853" },
+    });
+    // 已删除 SKU 不填仓库映射
+    expect(savedItem.skuMap.deleted.shopIdToWarehouseIdAndStockMap).toBeUndefined();
+  });
+
+  it("fills missing mandatory category attributes before saving", async () => {
+    miaoshou.getShopDetail.mockResolvedValue({
+      data: {
+        ossMd5: "latest-md5",
+        shopCollectItemInfo: {
+          cid: "845448",
+          title: "冬季圣诞毛绒中筒女袜",
+          deliveryOptionSetType: "default",
+          packageLength: 10,
+          packageWidth: 8,
+          packageHeight: 4,
+          productAttributes: [
+            {
+              attributeId: "100336",
+              attributeName: "原産国",
+              attributeValues: [{ valueName: "浙江诸暨", valueId: null }],
+            },
+          ],
+          skuMap: {
+            active: { price: 14.9, priceIncludeVat: 14.9, isDelete: "0", weight: 0.4 },
+          },
+        },
+      },
+    });
+    miaoshou.getShopWarehouseList.mockResolvedValue({ data: { shopWarehouseList: [] } });
+    miaoshou.getTikTokCategoryMetadata.mockResolvedValue({
+      data: {
+        categoryMetadata: {
+          categoryProductAttrList: [
+            {
+              attrId: "101095", attributeName: "製織方法", attributeNameAlias: "织造方法",
+              isMandatory: true,
+              values: [
+                { id: "1005845", name: "編み物", valueNameAlias: "针织" },
+                { id: "1005846", name: "ウーブン", valueNameAlias: "梭织" },
+              ],
+            },
+            {
+              attrId: "100336", attributeName: "原産国", attributeNameAlias: "原产地",
+              isMandatory: true,
+              values: [{ id: "1000850", name: "中国", valueNameAlias: "中国" }],
+            },
+          ],
+        },
+      },
+    });
+    miaoshou.saveShopDetail.mockResolvedValue({ result: "success" });
+
+    await realProductPublishWorkflowTools.saveEdit?.({
+      platformDetailId: "3228311508",
+      shopId: "16047893",
+      publishPrice: 99,
+      site: "JP",
+    });
+
+    const savedItem = miaoshou.saveShopDetail.mock.calls[0][3];
+    // 缺失的必填属性「织造方法」被补上，且优先命中中文「针织」
+    expect(savedItem.productAttributes).toEqual([
+      {
+        attributeId: "100336",
+        attributeName: "原産国",
+        attributeValues: [{ valueName: "浙江诸暨", valueId: "1000850" }],
+      },
+      {
+        attributeId: "101095",
+        attributeName: "织造方法",
+        attributeValues: [{ valueName: "针织", valueId: "1005845" }],
+      },
+    ]);
+  });
 });
 
 describe("listShops 的 OAuth 店铺 → 妙手店铺映射", () => {
@@ -266,7 +388,7 @@ describe("claimToShop 解析妙手店铺 ID", () => {
 
     await expect(
       realProductPublishWorkflowTools.claimToShop?.("3381559921", "ROW_cashio", { region: "JP", shopName: "Cashio" }),
-    ).rejects.toThrow("缺少有效的妙手店铺 ID");
+    ).rejects.toThrow("缺少有效的采集上架服务店铺 ID");
     expect(miaoshou.claimToShop).not.toHaveBeenCalled();
   });
 });
