@@ -2,7 +2,7 @@ import express from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { installAuthGate } from "./auth-gate.ts";
+import { installAuthGate, isAuthEnabled } from "./auth-gate.ts";
 import type { ChatRequest, MessageArtifact, SkuPricingRecord } from "../shared/contracts.ts";
 import { AGENT_CONTEXTS, type AgentContext } from "../shared/digital-employees.ts";
 import { dashboard } from "./data.ts";
@@ -337,6 +337,8 @@ export function createApp() {
       ok: true,
       mode,
       connections,
+      // 登录门是否生效。部署后可直接查这个字段，避免"以为有口令其实没有"
+      auth: { enabled: isAuthEnabled() },
       tiktok,
       llm: {
         connected: llmOverview.connected,
