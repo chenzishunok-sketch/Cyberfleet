@@ -28,6 +28,7 @@ import {
   type TikTokProductWriteKind,
 } from "./tiktok-product-writes.ts";
 import { actionPlanStore } from "./action-plan-store.ts";
+import { readStoredAuthorization } from "./tiktok-auth.ts";
 import { inferTikTokSceneQuery, runTikTokSceneQuery, analyzeCategoryTrack, type TikTokSceneQuery } from "./tiktok-scenes.ts";
 import { detectRegion, mentionsRegion } from "./tiktok-sites.ts";
 import { inferMiaoshouSceneQuery, runMiaoshouSceneQuery, miaoshouSceneFollowUps, type MiaoshouSceneQuery } from "./miaoshou-scenes.ts";
@@ -435,18 +436,20 @@ function createPlan(tool: ActionPlan["tool"], text: string, supplied?: Record<st
   return plan;
 }
 
-function createMiaoshouApproval(request: ChatRequest, scene: MiaoshouSceneQuery): ActionPlan {
+async function createMiaoshouApproval(request: ChatRequest, scene: MiaoshouSceneQuery): Promise<ActionPlan> {
   const id = randomUUID();
   const actionLabel = MIAOSHOU_WRITE_LABELS[scene] ?? "修改采集商品数据";
   const target = request.message.match(/https?:\/\/[^\s]+|\b\d{6,20}\b/i)?.[0] ?? "当前采集商品";
   const diffs: FieldDiff[] = [{ target, field: "采集操作", before: "未执行", after: actionLabel }];
   const planBase = { id, scene, query: request.message, diffs, createdAt: Date.now() };
+  // 店铺必须展示真实授权店铺，不能用演示 dashboard 的名字（曾误显示成 "Luma Living US"）
+  const storeLabel = await miaoshouStoreLabel();
   const plan: ActionPlan = {
     id,
     tool: "miaoshou.operation",
     title: actionLabel,
     summary: "审核通过后才会调用采集上架接口。执行完成后会返回接口结果，不能重复提交同一审核计划。",
-    store: dashboard.store.name,
+    store: storeLabel,
     risk: scene === "claim_to_platform" || scene === "publish_to_tiktok" ? "high" : "medium",
     diffs,
     expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
@@ -462,6 +465,22 @@ function createMiaoshouApproval(request: ChatRequest, scene: MiaoshouSceneQuery)
     history: request.history,
   });
   return plan;
+}
+
+/** 审核卡上展示的真实店铺名：优先 TikTok OAuth 授权店铺，查询失败时用中性描述，绝不显示演示店铺名 */
+async function miaoshouStoreLabel(): Promise<string> {
+  try {
+    const stored = await readStoredAuthorization();
+    const shops = (stored?.shops ?? []).map((shop) => ({
+      name: String(shop.name ?? "").trim(),
+      region: String(shop.region ?? "").trim().toUpperCase(),
+    })).filter((shop) => shop.name);
+    if (shops.length === 1) return shops[0].region ? `${shops[0].name} · ${shops[0].region}` : shops[0].name;
+    if (shops.length > 1) return `${shops.length} 家授权店铺（${shops.map((s) => s.name).slice(0, 3).join("、")}等）`;
+  } catch {
+    // OAuth 状态读不到时走兜底描述
+  }
+  return "已授权采集上架店铺";
 }
 
 function reportArtifact(days = 7, focus = "增长、退款和库存"): MessageArtifact {
@@ -1751,7 +1770,7 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
         }
       }
       if (MIAOSHOU_WRITE_SCENES.has(miaoshouQuery)) {
-        const plan = createMiaoshouApproval(request, miaoshouQuery);
+        const plan = await createMiaoshouApproval(request, miaoshouQuery);
         return {
           message: message("这项操作会修改采集商品数据。我已生成审核卡片，审核通过后才会调用接口。", { kind: "approval", plan }, createSteps("write")),
           runId: randomUUID(),
