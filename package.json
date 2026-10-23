@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@esotericsoftware/spine-pixi-v8": "~4.2.0",
-    "@larksuite/cli": "1.0.79",
+    "@larksuite/cli": "^1.0.98",
     "@larksuiteoapi/node-sdk": "1.71.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "express": "^5.2.1",

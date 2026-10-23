@@ -16,6 +16,7 @@ import {
   miaoshouGetPublishRecords,
   miaoshouGetShopList,
   miaoshouGetShopWarehouseList,
+  miaoshouGetCommonCollectBoxList,
   miaoshouResolveSite,
   miaoshouGetTikTokCollectBoxList,
   miaoshouGetTikTokCategoryMetadata,
@@ -28,6 +29,8 @@ import {
 } from "./miaoshou-client.ts";
 import { errorMessage, initialSteps as buildInitialSteps, patchStep as patchWorkflowStep, RunLockMap } from "./workflow-core.ts";
 import { WorkflowStore, workflowStore } from "./workflow-store.ts";
+import { autostartFlashSaleAfterPublish } from "./flash-sale-autostart.ts";
+import { autostartPricingAfterPublish } from "./pricing-autostart.ts";
 import { getAuthorizedTikTokClient, readStoredAuthorization } from "./tiktok-auth.ts";
 
 export interface ProductPublishWorkflowTools {
@@ -1438,6 +1441,13 @@ export class ProductPublishWorkflowEngine {
         error: expired ? "发布结果核验超时" : undefined,
         ...(verification.matched ? { completedAt: new Date().toISOString() } : {}),
       }));
+      // 发布核验成功拿到 TikTok 商品 ID 后，自动往下走「重新定价 → 报名秒杀」闭环。
+      // 异步触发，不阻塞发布核验返回；任一步失败只作为附加步骤记录，不影响已成功的发布。
+      if (verification.matched && verification.productId) {
+        void this.autostartPricingThenFlashSale(verification.productId, updated).catch((error) => {
+          console.warn(`[publish-autostart] 发布后自动定价/秒杀异常：${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
       return updated;
     } catch (error) {
       return this.update(id, (current) => patchStep({
@@ -1459,6 +1469,85 @@ export class ProductPublishWorkflowEngine {
       error: undefined,
       startedAt: new Date().toISOString(),
     }));
+  }
+
+  /**
+   * 采集箱发布路径没有 sourceUrl：用 TikTok 采集箱详情主图与公共采集箱缩略图匹配，
+   * 反查 1688 货源链接，供发布后自动定价使用。顺带读出妙手里真实的实重（kg）。
+   * 匹配不到时 sourceUrl 为 undefined。
+   */
+  private async resolveAutostartContext(run: ProductPublishWorkflowRun): Promise<{ sourceUrl?: string; weightKg?: number }> {
+    if (run.sourceUrl) return { sourceUrl: run.sourceUrl };
+    if (!run.platformDetailId || !run.miaoshouShopId) return {};
+    try {
+      const infoResp = await miaoshouGetTikTokShopCollectItemInfo(Number(run.platformDetailId), Number(run.miaoshouShopId));
+      const info = asRecord(asRecord(infoResp?.data)?.shopCollectItemInfo) ?? {};
+      const imgs = Array.isArray(info.imgUrls) ? info.imgUrls.map((value) => String(value ?? "").trim()).filter(Boolean) : [];
+      const weightRaw = Number(info.weight);
+      const weightKg = Number.isFinite(weightRaw) && weightRaw > 0 ? weightRaw : undefined;
+
+      let sourceUrl: string | undefined;
+      const mainImg = imgs[0];
+      if (mainImg) {
+        const commonResp = await miaoshouGetCommonCollectBoxList(1, 50);
+        const data = asRecord(commonResp?.data) ?? {};
+        const list = Array.isArray(data.detailList) ? data.detailList : [];
+        for (const entry of list) {
+          const item = asRecord(entry);
+          if (!item) continue;
+          const thumb = String(item.thumbnail ?? item.listThumbnail ?? "").trim();
+          if (!thumb || thumb !== mainImg) continue;
+          const source = Array.isArray(item.sourceList) ? asRecord(item.sourceList[0]) : undefined;
+          const url = String(source?.sourceItemUrl ?? "").trim();
+          if (url) {
+            sourceUrl = url.replace(/^http:\/\//i, "https://");
+            break;
+          }
+        }
+      }
+      return { sourceUrl, weightKg };
+    } catch {
+      // 反查失败不阻断：返回空后定价环节会以「无链接」跳过
+      return {};
+    }
+  }
+
+  /**
+   * 发布成功后的自动闭环：重新定价（算成本写飞书 V/Y）→ 报名秒杀（按 V 定价，时间=当下+3分钟）。
+   * 异步执行、失败只记日志并写入发布卡警告（让「没下文」变成有明确原因的提示），不影响已成功的发布。
+   * 秒杀预检通过后停在待确认，不会立即建活动。
+   */
+  private async autostartPricingThenFlashSale(tiktokProductId: string, run: ProductPublishWorkflowRun): Promise<void> {
+    // ① 重新定价：抓 1688 详情算成本，写飞书总表 V/Y（妙手/TMAP 缺数据时用发布流程已知值兜底）
+    const context = await this.resolveAutostartContext(run);
+    const pricing = await autostartPricingAfterPublish({
+      sourceUrl: context.sourceUrl,
+      productTitle: run.productTitle,
+      packageDimensions: run.packageDimensions,
+      weightKg: context.weightKg,
+    });
+    if (!pricing.priced) {
+      const reason = pricing.reason ?? "未知原因";
+      console.log(`[publish-autostart] 发布 ${tiktokProductId} 后定价未完成：${reason}；跳过秒杀报名。`);
+      await this.update(run.id, (current) => ({
+        ...current,
+        warnings: [...current.warnings.filter((warning) => !warning.startsWith("自动定价未完成：")), `自动定价未完成：${reason}`],
+      }));
+      return;
+    }
+    console.log(`[publish-autostart] 发布 ${tiktokProductId} 后已定价：飞书第 ${pricing.feishuRow} 行，V=${pricing.priceJpy} JPY，Y=${pricing.originalPriceJpy} JPY（公式校验 ${pricing.formulaStatus}，错误 ${pricing.formulaErrors}）。`);
+
+    // ② 报名秒杀：读飞书该行 V 定价，按当下+3分钟报名
+    const flashSale = await autostartFlashSaleAfterPublish({
+      tiktokProductId,
+      sourceUrl: run.sourceUrl,
+      shopName: run.shopName,
+    });
+    if (flashSale.started && flashSale.flashSaleRunId) {
+      console.log(`[publish-autostart] 发布 ${tiktokProductId} 后已创建秒杀任务 ${flashSale.flashSaleRunId}（秒杀价 ${flashSale.priceJpy} JPY，${flashSale.startAt} 起）。`);
+    } else {
+      console.log(`[publish-autostart] 发布 ${tiktokProductId} 后未自动报名秒杀：${flashSale.reason ?? "未知原因"}`);
+    }
   }
 
   private async fail(id: string, stepId: WorkflowStep["id"], error: unknown): Promise<ProductPublishWorkflowRun> {
