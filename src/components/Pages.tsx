@@ -81,6 +81,11 @@ const SCHEDULE_TYPE_META: Record<ScheduledTask["type"], { label: string; icon: R
   learning_reflection: { label: "复盘学习", icon: <Bot size={18} /> },
 };
 
+/** 后端新增任务类型时前端不该白屏：查不到就退回原始 type 名和通用图标 */
+function scheduleMeta(type: string): { label: string; icon: ReactNode } {
+  return SCHEDULE_TYPE_META[type as ScheduledTask["type"]] ?? { label: type, icon: <FileBarChart size={18} /> };
+}
+
 function formatRunTime(value?: string): string {
   if (!value) return "从未运行";
   const date = new Date(value);
@@ -95,7 +100,7 @@ function ScheduledTaskRow({ task, lastLog, busy, onToggle, onRun }: {
   onToggle: () => void;
   onRun: () => void;
 }) {
-  const meta = SCHEDULE_TYPE_META[task.type];
+  const meta = scheduleMeta(task.type);
   // 以任务上记录的结果为准，没有则回落到本次会话拉到的执行日志
   const summary = task.lastResult?.summary || lastLog?.summary || "";
   const succeeded = task.lastResult?.success ?? lastLog?.success ?? true;
@@ -176,7 +181,7 @@ function AutomationsPage({ onOpenChat, onNotify }: PageProps) {
   };
 
   const keyword = query.trim().toLowerCase();
-  const visibleTasks = tasks.filter((task) => `${task.name} ${task.description ?? ""} ${task.cron} ${SCHEDULE_TYPE_META[task.type].label}`.toLowerCase().includes(keyword));
+  const visibleTasks = tasks.filter((task) => `${task.name} ${task.description ?? ""} ${task.cron} ${scheduleMeta(task.type).label}`.toLowerCase().includes(keyword));
   const runningCount = tasks.filter((task) => task.status === "active").length;
   const pausedCount = tasks.filter((task) => task.status !== "active").length;
   const succeeded = logs.filter((log) => log.success).length;
