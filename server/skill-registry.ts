@@ -1,4 +1,5 @@
-import { chmod, readFile, writeFile, mkdir } from "node:fs/promises";
+import { chmod, readFile, mkdir, open, rename, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path, { join } from "node:path";
 import type {
   SkillDefinition,
@@ -166,7 +167,10 @@ async function readStore(): Promise<SkillsStore> {
   storeReadPromise = (async () => {
     try {
       const content = await readFile(skillsFilePath(), "utf-8");
-      cachedStore = JSON.parse(content) as SkillsStore;
+      const parsed: unknown = JSON.parse(content);
+      // JSON.parse 成功不代表是我们要的结构：文件里是 null / 数组时照样解析得动，
+      // 但后面 store[key] 会直接抛 TypeError。只认普通对象。
+      cachedStore = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as SkillsStore) : {};
     } catch {
       cachedStore = {};
     }
@@ -177,6 +181,27 @@ async function readStore(): Promise<SkillsStore> {
 }
 
 async function writeStore(store: SkillsStore): Promise<void> {
+  const skillsFile = skillsFilePath();
+  const directory = path.dirname(skillsFile);
+  const temporaryPath = `${skillsFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  await mkdir(directory, { recursive: true });
+  // 先写临时文件再原子替换：skills.json 里存着第三方密钥，
+  // 直接覆盖时进程被杀会留下半个 JSON，下次启动所有连接器配置全丢。
+  try {
+    const file = await open(temporaryPath, "w", 0o600);
+    try {
+      await file.writeFile(`${JSON.stringify(store, null, 2)}\n`, "utf8");
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    await rename(temporaryPath, skillsFile);
+    await chmod(skillsFile, 0o600).catch(() => undefined);
+  } catch (error) {
+    await rm(temporaryPath, { force: true });
+    throw error;
+  }
+  // 落盘成功后才更新缓存：写失败时不能假装已经保存
   cachedStore = store;
   // 配置变更后清除能力描述和工具缓存，下次读取时重建
   cachedSkillTools = undefined;
@@ -185,11 +210,6 @@ async function writeStore(store: SkillsStore): Promise<void> {
   clearFeishuTokenCache();
   resetChuhaijiangConnection();
   resetFastMossConnection();
-  const skillsFile = skillsFilePath();
-  await mkdir(path.dirname(skillsFile), { recursive: true });
-  await writeFile(skillsFile, JSON.stringify(store, null, 2), "utf-8");
-  // skills.json 存有第三方密钥，权限与 tiktok-authorization.json 一致收敛为 0600
-  await chmod(skillsFile, 0o600).catch(() => undefined);
 }
 
 // ─── 核心逻辑 ─────────────────────────────────────────────────

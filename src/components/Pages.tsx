@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -8,6 +8,7 @@ import {
   Boxes,
   Check,
   CheckCircle2,
+  Clock3,
   Download,
   FileBarChart,
   FileText,
@@ -16,6 +17,7 @@ import {
   MessageSquare,
   MessageSquareText,
   PackageSearch,
+  Play,
   Plus,
   Radar,
   RefreshCcw,
@@ -23,8 +25,9 @@ import {
   Store,
 } from "lucide-react";
 import type {
-  Automation,
   DashboardSnapshot,
+  ScheduledTask,
+  ScheduledTaskRunLog,
   SkillsCatalogResponse,
   TikTokBindingSummary,
   LlmProviderSummary,
@@ -34,6 +37,7 @@ import type {
 } from "../../shared/contracts";
 import { WorkflowCenter } from "./WorkflowCenter";
 import { api, API_BASE } from "../api";
+import { describeCron } from "../../shared/cron-label";
 import type { TikTokConnectionStatus } from "../api";
 import { regionLabel } from "../region-labels";
 import type { ViewId } from "./Sidebar";
@@ -42,8 +46,9 @@ interface PageProps {
   dashboard: DashboardSnapshot;
   connections: { llm: boolean; tiktok: boolean };
   tiktokConnection: TikTokConnectionStatus;
-  onToggleAutomation: (id: string) => void;
   onOpenChat: (prompt?: string) => void;
+  /** 页面内的异步操作结果统一走全局 toast，避免操作成功却没有任何反馈 */
+  onNotify?: (toast: { tone: "success" | "error" | "info"; text: string }) => void;
   llmOverview?: LlmProvidersOverview;
   onLlmChanged: () => Promise<void>;
   onAddLlmProvider: () => void;
@@ -69,37 +74,136 @@ function downloadText(name: string, content: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
-function AutomationRow({ automation, onToggle }: { automation: Automation; onToggle: () => void }) {
+const SCHEDULE_TYPE_META: Record<ScheduledTask["type"], { label: string; icon: ReactNode }> = {
+  read_only_query: { label: "只读查询", icon: <Search size={18} /> },
+  proactive_inspection: { label: "主动巡检", icon: <Radar size={18} /> },
+  report_generation: { label: "报告生成", icon: <FileBarChart size={18} /> },
+  learning_reflection: { label: "复盘学习", icon: <Bot size={18} /> },
+};
+
+function formatRunTime(value?: string): string {
+  if (!value) return "从未运行";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "时间未知";
+  return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function ScheduledTaskRow({ task, lastLog, busy, onToggle, onRun }: {
+  task: ScheduledTask;
+  lastLog?: ScheduledTaskRunLog;
+  busy: boolean;
+  onToggle: () => void;
+  onRun: () => void;
+}) {
+  const meta = SCHEDULE_TYPE_META[task.type];
+  // 以任务上记录的结果为准，没有则回落到本次会话拉到的执行日志
+  const summary = task.lastResult?.summary || lastLog?.summary || "";
+  const succeeded = task.lastResult?.success ?? lastLog?.success ?? true;
+  const running = task.status === "active";
   return (
-    <div className="automation-row">
-      <span className={`large-list-icon large-list-icon--${automation.kind}`}>{automation.kind === "alert" ? <AlertTriangle size={18} /> : <FileBarChart size={18} />}</span>
-      <div className="automation-primary"><strong>{automation.name}</strong><span>{automation.scope}</span></div>
-      <div className="list-data"><span>运行规则</span><strong>{automation.schedule}</strong></div>
-      <div className="list-data"><span>下次运行</span><strong>{automation.nextRun}</strong></div>
-      <div className="list-data"><span>最近结果</span><strong className="success-text"><CheckCircle2 size={14} />{automation.lastResult}</strong></div>
-      <button className={`switch ${automation.enabled ? "switch--on" : ""}`} role="switch" aria-checked={automation.enabled} aria-label={`${automation.enabled ? "停用" : "启用"}${automation.name}`} onClick={onToggle}><span /></button>
+    <div className="automation-row automation-row--scheduled">
+      <span className={`large-list-icon large-list-icon--${task.type === "proactive_inspection" ? "alert" : "report"}`}>{meta.icon}</span>
+      <div className="automation-primary"><strong>{task.name}</strong><span>{meta.label}{task.description ? ` · ${task.description}` : ""}</span></div>
+      <div className="list-data"><span>运行规则</span><strong title={task.cron}>{describeCron(task.cron)}</strong></div>
+      <div className="list-data"><span>最近运行</span><strong>{formatRunTime(task.lastRunAt)}</strong></div>
+      <div className="list-data">
+        <span>最近结果</span>
+        {summary
+          ? <strong className={succeeded ? "success-text" : "warning-text"}>{succeeded ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}{summary.length > 20 ? `${summary.slice(0, 20)}…` : summary}</strong>
+          : <strong className="muted-text">还没有执行记录</strong>}
+      </div>
+      <button className="run-task-button" onClick={onRun} disabled={busy} aria-label={`立即运行${task.name}`}>
+        {busy ? <LoaderCircle size={13} className="spin" /> : <Play size={13} />}运行
+      </button>
+      <button className={`switch ${running ? "switch--on" : ""}`} role="switch" aria-checked={running} aria-label={`${running ? "暂停" : "启用"}${task.name}`} disabled={busy} onClick={onToggle}><span /></button>
     </div>
   );
 }
 
-function AutomationsPage({ dashboard, onToggleAutomation, onOpenChat }: PageProps) {
+function AutomationsPage({ onOpenChat, onNotify }: PageProps) {
   const [workflowTab, setWorkflowTab] = useState<"monitor" | "templates" | "builder">("monitor");
   const [query, setQuery] = useState("");
-  const automations = dashboard.automations.filter((automation) => `${automation.name} ${automation.scope} ${automation.schedule}`.toLowerCase().includes(query.trim().toLowerCase()));
-  const runningCount = dashboard.automations.filter((automation) => automation.enabled).length;
-  const completedRuns = dashboard.activity.filter((activity) => activity.title.includes("自动") || activity.meta.includes("自动任务"));
-  const successfulRuns = completedRuns.filter((activity) => activity.status === "success").length;
+  const [tasks, setTasks] = useState<ScheduledTask[]>([]);
+  const [logs, setLogs] = useState<ScheduledTaskRunLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string>();
+  const [busyId, setBusyId] = useState<string>();
+
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const [taskResult, logResult] = await Promise.all([api.schedulerTasks(), api.schedulerLogs(50)]);
+      setTasks(taskResult.tasks);
+      setLogs(logResult.logs);
+      setLoadError(undefined);
+    } catch (error) {
+      // 静默刷新失败不覆盖已有列表，避免「刷新一下任务全没了」的错觉
+      if (!silent) setLoadError(error instanceof Error ? error.message : "读取定时任务失败。");
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const toggleTask = async (task: ScheduledTask) => {
+    setBusyId(task.id);
+    try {
+      const updated = task.status === "active" ? await api.pauseScheduledTask(task.id) : await api.resumeScheduledTask(task.id);
+      setTasks((current) => current.map((item) => item.id === updated.id ? updated : item));
+      onNotify?.({ tone: "success", text: updated.status === "active" ? `已启用「${updated.name}」` : `已暂停「${updated.name}」` });
+    } catch (error) {
+      onNotify?.({ tone: "error", text: error instanceof Error ? error.message : "更新定时任务失败。" });
+    } finally {
+      setBusyId(undefined);
+    }
+  };
+
+  const runTask = async (task: ScheduledTask) => {
+    setBusyId(task.id);
+    try {
+      const log = await api.runScheduledTask(task.id);
+      setLogs((current) => [log, ...current].slice(0, 50));
+      await load(true);
+      onNotify?.({ tone: log.success ? "success" : "error", text: `「${task.name}」${log.success ? "执行完成" : "执行失败"}：${log.summary}` });
+    } catch (error) {
+      onNotify?.({ tone: "error", text: error instanceof Error ? error.message : "任务执行失败。" });
+    } finally {
+      setBusyId(undefined);
+    }
+  };
+
+  const keyword = query.trim().toLowerCase();
+  const visibleTasks = tasks.filter((task) => `${task.name} ${task.description ?? ""} ${task.cron} ${SCHEDULE_TYPE_META[task.type].label}`.toLowerCase().includes(keyword));
+  const runningCount = tasks.filter((task) => task.status === "active").length;
+  const pausedCount = tasks.filter((task) => task.status !== "active").length;
+  const succeeded = logs.filter((log) => log.success).length;
+  const successRate = logs.length ? `${Math.round((succeeded / logs.length) * 100)}%` : "--";
+  const latestLog = logs[0];
   return (
     <div className="page-content">
       <PageHeader eyebrow="WORKFLOWS" title="工作流" description="监控 Agent 执行、复用业务模板，并编排数字员工协作。" />
       <WorkflowCenter activeTab={workflowTab} onTabChange={setWorkflowTab} onOpenChat={onOpenChat} />
       {workflowTab === "monitor" && <>
-        <div className="section-heading workflow-scheduled-heading"><div><h2>定时任务</h2><span>{automations.length} 项</span></div><button className="secondary-button" onClick={() => onOpenChat("创建一个新的自动运营任务")}><Plus size={16} />新建定时任务</button></div>
+        <div className="section-heading workflow-scheduled-heading"><div><h2>定时任务</h2><span>{tasks.length} 项</span></div><button className="secondary-button" onClick={() => onOpenChat("创建一个新的自动运营任务")}><Plus size={16} />新建定时任务</button></div>
         <div className="summary-band">
-          <div><span>运行中</span><strong>{runningCount}</strong></div><div><span>已有运行记录</span><strong>{completedRuns.length}</strong></div><div><span>成功率</span><strong>{completedRuns.length ? `${Math.round((successfulRuns / completedRuns.length) * 100)}%` : "--"}</strong></div><div><span>节省时间</span><strong>--</strong></div>
+          <div><span>运行中</span><strong>{runningCount}</strong></div>
+          <div><span>已暂停</span><strong>{pausedCount}</strong></div>
+          <div><span>运行记录</span><strong>{logs.length}</strong></div>
+          <div><span>成功率</span><strong>{successRate}</strong></div>
         </div>
-        <div className="list-toolbar"><div className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务" aria-label="搜索任务" /></div></div>
-        <div className="automation-table">{automations.map((automation) => <AutomationRow key={automation.id} automation={automation} onToggle={() => onToggleAutomation(automation.id)} />)}</div>
+        <div className="list-toolbar">
+          <div className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务" aria-label="搜索任务" /></div>
+          <span className="list-toolbar-meta">最近一次执行：{latestLog ? `${formatRunTime(latestLog.runAt)} · ${latestLog.taskName}` : "暂无"}</span>
+        </div>
+        {loadError && <div className="inline-notice inline-notice--error"><AlertTriangle size={16} /><span>{loadError}</span><button className="secondary-button" onClick={() => void load()}>重试</button></div>}
+        {loading
+          ? <div className="page-empty page-empty--compact"><LoaderCircle size={23} className="spin" /><h2>正在读取定时任务</h2><p>从调度引擎拉取任务列表和执行记录。</p></div>
+          : visibleTasks.length > 0
+            ? <div className="automation-table">{visibleTasks.map((task) => <ScheduledTaskRow key={task.id} task={task} lastLog={logs.find((log) => log.taskId === task.id)} busy={busyId === task.id} onToggle={() => void toggleTask(task)} onRun={() => void runTask(task)} />)}</div>
+            : <div className="page-empty page-empty--compact"><Clock3 size={23} /><h2>{tasks.length ? "没有匹配的定时任务" : "还没有定时任务"}</h2><p>{tasks.length ? "换个关键词试试。" : "用一句话描述想让 Agent 定时做什么，例如「每天 18 点生成经营日报」。"}</p>{tasks.length === 0 && <button className="secondary-button" onClick={() => onOpenChat("每天 18 点生成一份当日经营日报")}>创建第一个定时任务<ArrowRight size={15} /></button>}</div>}
       </>}
     </div>
   );

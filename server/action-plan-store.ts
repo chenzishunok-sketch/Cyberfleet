@@ -15,6 +15,8 @@ interface RecoverablePlan {
 export interface ActionPlanRecoverySummary {
   expired: number;
   verificationPending: number;
+  /** 解析失败被跳过的记录数。有一条坏数据不该让整批恢复中断 */
+  skipped: number;
 }
 
 function databasePath(): string {
@@ -29,7 +31,15 @@ export class ActionPlanStore {
 
   get<T>(id: string): T | undefined {
     const row = this.database().prepare("SELECT payload FROM action_plans WHERE id = ?").get(id) as unknown as ActionPlanRow | undefined;
-    return row ? JSON.parse(row.payload) as T : undefined;
+    if (!row) return undefined;
+    try {
+      return JSON.parse(row.payload) as T;
+    } catch {
+      // 一条损坏的记录不该让审批入口直接 500。按「找不到」处理，
+      // 用户会收到"计划已失效，请重新生成"，比一个 500 有用。
+      console.warn(`[ActionPlanStore] 计划 ${id} 的数据已损坏，按不存在处理`);
+      return undefined;
+    }
   }
 
   save<T extends { core: { id: string; kind: string; expiresAt: string }; status: string }>(plan: T): void {
@@ -48,9 +58,18 @@ export class ActionPlanStore {
     const rows = this.database().prepare(`
       SELECT payload FROM action_plans WHERE status IN ('pending', 'executing')
     `).all() as unknown as ActionPlanRow[];
-    const summary = { expired: 0, verificationPending: 0 };
+    const summary = { expired: 0, verificationPending: 0, skipped: 0 };
     for (const row of rows) {
-      const plan = JSON.parse(row.payload) as RecoverablePlan;
+      let plan: RecoverablePlan;
+      try {
+        plan = JSON.parse(row.payload) as RecoverablePlan;
+      } catch {
+        // 以前这里是裸 parse：一条坏数据抛错，整个恢复循环中断，
+        // 后面所有待恢复的计划都不会被处理，服务启动日志里只会看到一条 unhandledRejection。
+        summary.skipped += 1;
+        console.warn("[ActionPlanStore] 跳过一条损坏的待恢复计划");
+        continue;
+      }
       const nextStatus = plan.status === "executing"
         ? "verification_pending"
         : new Date(plan.core.expiresAt).getTime() < now ? "expired" : undefined;

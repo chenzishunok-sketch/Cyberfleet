@@ -28,7 +28,7 @@ vi.mock("../server/tiktok-data.ts", () => ({
   getCurrentDashboard: vi.fn(async () => ({
     dataSource: "tiktok",
     store: { id: "shop-jp", name: "Mikolo", region: "JP", currency: "JPY", timezone: "Asia/Tokyo", connected: true },
-    metrics: [], salesSeries: [], products: [], automations: [], activity: [], alerts: [], dataAsOf: "now",
+    metrics: [], salesSeries: [], products: [], activity: [], alerts: [], dataAsOf: "now",
   })),
 }));
 

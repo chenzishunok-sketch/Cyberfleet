@@ -265,7 +265,8 @@ export default function App() {
         : current);
     } catch (error) {
       const aborted = error instanceof DOMException && error.name === "AbortError";
-      const partial = chatStreaming.end()?.content.trim();
+      // 限定会话：切会话时这个 catch 会被触发，但此时流式状态可能已经属于新会话
+      const partial = chatStreaming.end(targetConversationId)?.content.trim();
       if (aborted) {
         // 用户主动停止：保留已生成的部分内容
         if (partial) {
@@ -283,7 +284,7 @@ export default function App() {
         setToast({ tone: "error", text: error instanceof Error ? error.message : "处理指令失败。" });
       }
     } finally {
-      chatStreaming.end();
+      chatStreaming.end(targetConversationId);
       setSendingConversationIds((current) => current.filter((conversationId) => conversationId !== targetConversationId));
     }
   }, []);
@@ -342,26 +343,6 @@ export default function App() {
       setToast({ tone: "error", text: error instanceof Error ? error.message : "无法取消计划。" });
     } finally {
       setBusyActionId(undefined);
-    }
-  }, []);
-
-  const toggleAutomation = useCallback(async (automationId: string) => {
-    try {
-      const result = await api.toggleAutomation(automationId);
-      setDashboard((current) => current ? { ...current, automations: current.automations.map((item) => item.id === automationId ? result.automation : item) } : current);
-      setConversationState((current) => current ? {
-        ...current,
-        conversations: current.conversations.map((conversation) => ({
-          ...conversation,
-          messages: conversation.messages.map((chatMessage) => {
-            if (chatMessage.artifact?.kind !== "automation" || chatMessage.artifact.automation.id !== automationId) return chatMessage;
-            return { ...chatMessage, artifact: { ...chatMessage.artifact, automation: result.automation } };
-          }),
-        })),
-      } : current);
-      setToast({ tone: "success", text: result.automation.enabled ? "自动任务已启用。" : "自动任务已暂停。" });
-    } catch (error) {
-      setToast({ tone: "error", text: error instanceof Error ? error.message : "更新任务失败。" });
     }
   }, []);
 
@@ -506,7 +487,6 @@ export default function App() {
               onSend={sendMessage}
               onApprove={approveAction}
               onReject={rejectAction}
-              onToggleAutomation={toggleAutomation}
               onStopStreaming={stopStreaming}
             />
           </div>
@@ -532,7 +512,7 @@ export default function App() {
             dashboard={dashboard}
             connections={liveConnections}
             tiktokConnection={tiktokConnection}
-            onToggleAutomation={toggleAutomation}
+            onNotify={setToast}
             onOpenChat={openChat}
             llmOverview={llmOverview}
             onLlmChanged={refreshLlm}

@@ -1638,23 +1638,39 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
     const sceneQuery = inferTikTokSceneQuery(request.message);
     if (sceneQuery) {
       const requestedDays = extractDays(request.message);
-      const result = await runTikTokSceneQuery(sceneQuery, requestedDays, request.message);
-      const content = sceneQuery === "market_products" && asksForProductOperation(request.message)
-        ? `商品上架和下架接口已经接通；执行时必须给出准确商品并人工确认。${result.content}`
-        : result.content;
-      const responseMsg = message(
-          content,
-          result.artifact,
-          sceneQuerySteps(sceneQuery, requestedDays, result.artifact.source),
-          sceneFollowUps(sceneQuery, result.artifact, requestedDays, request.message),
+      try {
+        const result = await runTikTokSceneQuery(sceneQuery, requestedDays, request.message);
+        const content = sceneQuery === "market_products" && asksForProductOperation(request.message)
+          ? `商品上架和下架接口已经接通；执行时必须给出准确商品并人工确认。${result.content}`
+          : result.content;
+        const responseMsg = message(
+            content,
+            result.artifact,
+            sceneQuerySteps(sceneQuery, requestedDays, result.artifact.source),
+            sceneFollowUps(sceneQuery, result.artifact, requestedDays, request.message),
+            request.message,
+          );
+        // 异步提取记忆
+        void extractAndSaveMemory(request, responseMsg);
+        return {
+          message: responseMsg,
+          runId: randomUUID(),
+        };
+      } catch (error) {
+        // 以前这条路径没有兜底：TikTok 接口一抖就直接抛到最外层变成 500「服务暂时不可用」，
+        // 用户会以为整个系统挂了，实际只是数据源这一次没返回。
+        const reason = error instanceof Error ? error.message : "未知错误";
+        console.warn(`[TikTok 场景查询失败] ${sceneQuery}: ${reason}`);
+        const responseMsg = message(
+          `这次没能从 TikTok 拿到数据：${reason} 可以稍后重试，或先看店铺销售、商品、库存这些基础数据。`,
+          undefined,
+          undefined,
+          ["查询最近 7 天销售情况", "查看全部商品库存", "生成近 7 天经营报告"],
           request.message,
         );
-      // 异步提取记忆
-      void extractAndSaveMemory(request, responseMsg);
-      return {
-        message: responseMsg,
-        runId: randomUUID(),
-      };
+        void extractAndSaveMemory(request, responseMsg);
+        return { message: responseMsg, runId: randomUUID() };
+      }
     }
 
     const writeKind = inferLiveProductWrite(request.message);

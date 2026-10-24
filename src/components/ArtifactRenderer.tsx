@@ -44,7 +44,6 @@ interface ArtifactRendererProps {
   onApprove: (id: string) => void;
   onReject: (id: string) => void;
   onPrompt: (prompt: string) => void;
-  onToggleAutomation: (id: string) => void;
 }
 
 const statusLabels: Record<ProductRow["status"], string> = {
@@ -157,7 +156,7 @@ function ApprovalCard({ plan, busy, onApprove, onReject }: { plan: ActionPlan; b
   );
 }
 
-export function ArtifactRenderer({ artifact, busyActionId, onApprove, onReject, onPrompt, onToggleAutomation }: ArtifactRendererProps) {
+export function ArtifactRenderer({ artifact, busyActionId, onApprove, onReject, onPrompt }: ArtifactRendererProps) {
   if (artifact.kind === "analysis") {
     const periodDays = artifact.series.length || extractPeriodDays(artifact.headline, artifact.source);
     const currentPeriodLabel = periodDays ? `近 ${periodDays} 天` : "本周期";
@@ -367,7 +366,9 @@ export function ArtifactRenderer({ artifact, busyActionId, onApprove, onReject, 
         <div className="artifact-header"><div className="artifact-title-row"><span className="artifact-icon"><Clock3 size={17} /></span><div><span className="eyebrow">自动任务草稿</span><h3>{artifact.automation.name}</h3></div></div><span className="draft-badge">未启用</span></div>
         <dl className="plan-meta"><div><dt>运行时间</dt><dd>{artifact.automation.schedule}</dd></div><div><dt>店铺范围</dt><dd>{artifact.automation.scope}</dd></div><div><dt>写操作</dt><dd>无</dd></div></dl>
         <div className="condition-list">{artifact.conditions.map((condition) => <div key={condition}><CheckCircle2 size={15} /><span>{condition}</span></div>)}</div>
-        <div className="artifact-actions"><button className="primary-button" onClick={() => onToggleAutomation(artifact.automation.id)}><Play size={16} />启用任务</button><button className="secondary-button" onClick={() => onPrompt("试运行这个自动任务")}>试运行</button></div>
+        {/* 这个按钮以前打的是一个恒 404 的接口。草稿要真正落地必须经调度引擎，
+            所以改成把草稿交回对话，让负责调度的 Agent 来建任务。 */}
+        <div className="artifact-actions"><button className="primary-button" onClick={() => onPrompt(`启用这个自动任务：${artifact.automation.name}（${artifact.automation.schedule}）`)}><Play size={16} />启用任务</button><button className="secondary-button" onClick={() => onPrompt("试运行这个自动任务")}>试运行</button></div>
       </section>
     );
   }

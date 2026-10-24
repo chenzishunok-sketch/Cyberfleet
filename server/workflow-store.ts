@@ -39,6 +39,21 @@ function parseRun(payload: string): BusinessWorkflowRun {
   return JSON.parse(payload) as BusinessWorkflowRun;
 }
 
+/**
+ * 宽容版解析：解析失败返回 undefined。
+ *
+ * 用于「把已有记录读出来给用户看」的路径（列表、详情、中断恢复）。一条记录对不上
+ * 不该让整个任务中心 500，也不该让其余任务卡在 running 状态永远恢复不了。
+ */
+function tryParseRun(payload: string): BusinessWorkflowRun | undefined {
+  try {
+    return parseRun(payload);
+  } catch {
+    console.warn("[WorkflowStore] 跳过一条损坏的任务记录");
+    return undefined;
+  }
+}
+
 function changedStep(before: BusinessWorkflowRun, after: BusinessWorkflowRun) {
   // DAG 工作流：检查 nodeStates 变化
   if ("nodeStates" in after && "nodeStates" in before) {
@@ -68,13 +83,18 @@ export class WorkflowStore {
       ORDER BY updated_at DESC
       LIMIT ?
     `).all(MAX_LISTED_RUNS) as unknown as WorkflowRow[];
-    return rows.map((row) => cloneRun(parseRun(row.payload)));
+    return rows.flatMap((row) => {
+      const run = tryParseRun(row.payload);
+      return run ? [cloneRun(run)] : [];
+    });
   }
 
   async get(id: string): Promise<BusinessWorkflowRun | undefined> {
     await this.mutationQueue;
     const row = this.database().prepare("SELECT payload FROM workflow_runs WHERE id = ?").get(id) as unknown as WorkflowRow | undefined;
-    return row ? cloneRun(parseRun(row.payload)) : undefined;
+    if (!row) return undefined;
+    const run = tryParseRun(row.payload);
+    return run ? cloneRun(run) : undefined;
   }
 
   /** 按状态统计工作流数量（用于办公室实时统计卡） */
@@ -124,7 +144,9 @@ export class WorkflowStore {
       const rows = database.prepare("SELECT payload FROM workflow_runs WHERE status = 'running'").all() as unknown as WorkflowRow[];
       const summary = { failed: 0, verificationPending: 0 };
       for (const row of rows) {
-        const run = parseRun(row.payload);
+        const run = tryParseRun(row.payload);
+        // 一条坏记录不能让后面的任务卡死在 running：跳过它继续恢复其余的
+        if (!run) continue;
         // DAG 工作流恢复
         if ("nodeStates" in run) {
           const dagRun = run as import("../shared/contracts.ts").DagWorkflowRun;

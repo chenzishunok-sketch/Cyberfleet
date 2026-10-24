@@ -1126,8 +1126,20 @@ export function createApp() {
     response.setHeader("X-Accel-Buffering", "no");
     response.flushHeaders?.();
 
+    // 客户端断开（关页面/刷新/点「停止」）时记下来，避免继续往死连接写
+    let streamClosed = false;
+    request.on("close", () => { streamClosed = true; });
+
     const send = (event: { type: string } & Record<string, unknown>) => {
-      response.write(`data: ${JSON.stringify(event)}\n\n`);
+      // 连接断开后继续 write 会触发 ERR_STREAM_WRITE_AFTER_END，
+      // 而这时数据其实已经查完，只是没人接收——不该因此把整轮对话打成 500。
+      if (streamClosed) return;
+      try {
+        response.write(`data: ${JSON.stringify(event)}\n\n`);
+      } catch (error) {
+        streamClosed = true;
+        console.warn("[chat] 流式写入失败，连接可能已断开：", error instanceof Error ? error.message : error);
+      }
     };
 
     try {
@@ -1136,7 +1148,7 @@ export function createApp() {
     } catch (error) {
       send({ type: "error", message: error instanceof Error ? error.message : "处理指令失败。" });
     } finally {
-      response.end();
+      if (!streamClosed) response.end();
     }
   });
 
@@ -1154,19 +1166,6 @@ export function createApp() {
     } catch (error) {
       response.status(409).json({ error: error instanceof Error ? error.message : "无法取消。" });
     }
-  });
-
-  app.post("/api/automations/:id/toggle", async (request, response) => {
-    // 读当前数据源（真实模式为 TikTok 实时数据，演示模式为内置演示数据），
-    // 不再固定使用演示数据里的自动任务，避免真实模式下操作到假对象。
-    const current = await getCurrentDashboard();
-    const automation = current.automations.find((item) => item.id === request.params.id);
-    if (!automation) {
-      response.status(404).json({ error: "未找到该自动任务。" });
-      return;
-    }
-    automation.enabled = !automation.enabled;
-    response.json({ automation });
   });
 
   // 生产单端口：若存在前端构建产物（npm run build 生成的 dist），由本服务直接托管，

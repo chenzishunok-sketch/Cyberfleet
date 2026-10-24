@@ -119,7 +119,14 @@ class MemoryLayerStore {
       const path = layerPath();
       if (existsSync(path)) {
         const raw = readFileSync(path, "utf-8");
-        this.data = JSON.parse(raw);
+        const parsed: unknown = JSON.parse(raw);
+        // 解析成功不等于结构对：文件里是 null / 数组、或老版本缺字段时，
+        // 后面取 .private / .shared 会直接崩，这里统一补齐
+        const record = (parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}) as Partial<AgentMemoryLayer>;
+        this.data = {
+          private: record.private && typeof record.private === "object" && !Array.isArray(record.private) ? record.private : {},
+          shared: Array.isArray(record.shared) ? record.shared : [],
+        };
       }
     } catch {
       this.data = { private: {}, shared: [] };

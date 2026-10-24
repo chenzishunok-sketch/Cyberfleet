@@ -86,8 +86,15 @@ export const chatStreaming = {
     activeController?.abort();
   },
 
-  /** 结束本轮流式输出，返回本轮状态（含部分生成内容）供调用方落账 */
-  end(): ChatStreamingState | undefined {
+  /**
+   * 结束本轮流式输出，返回本轮状态（含部分生成内容）供调用方落账。
+   *
+   * 传 conversationId 时只在它仍是当前流时才结束：用户在 A 会话发消息、没等完就切到 B 发送，
+   * 切换会 abort A 的请求，A 的 catch 走到这里时 B 正在输出。以前无条件 end 会把 B 的
+   * 流式内容顺手清掉，新会话的字会突然消失。
+   */
+  end(conversationId?: string): ChatStreamingState | undefined {
+    if (conversationId && active && active.conversationId !== conversationId) return undefined;
     const finished = active;
     active = undefined;
     activeController = undefined;

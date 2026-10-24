@@ -18,7 +18,6 @@ interface ChatWorkspaceProps {
   onSend: (text: string, attachments?: ChatImageAttachment[]) => void;
   onApprove: (id: string) => void;
   onReject: (id: string) => void;
-  onToggleAutomation: (id: string) => void;
   onStopStreaming?: () => void;
 }
 
@@ -123,7 +122,7 @@ function isConnectionNotice(message: ChatMessage): boolean {
     && message.content.includes("TikTok Shop Open API");
 }
 
-export const ChatWorkspace = memo(function ChatWorkspace({ messages, sending, conversationId, busyActionId, conversationTitle, projectName, workspace = "general", onSend, onApprove, onReject, onToggleAutomation, onStopStreaming }: ChatWorkspaceProps) {
+export const ChatWorkspace = memo(function ChatWorkspace({ messages, sending, conversationId, busyActionId, conversationTitle, projectName, workspace = "general", onSend, onApprove, onReject, onStopStreaming }: ChatWorkspaceProps) {
   const [input, setInput] = useState("");
   const [attachment, setAttachment] = useState<ChatImageAttachment>();
   const [attachmentError, setAttachmentError] = useState<string>();
@@ -316,7 +315,6 @@ export const ChatWorkspace = memo(function ChatWorkspace({ messages, sending, co
                   onApprove={onApprove}
                   onReject={onReject}
                   onPrompt={onSend}
-                  onToggleAutomation={onToggleAutomation}
                 />
               )}
               {!sending && chatMessage.id === latestAssistantId && chatMessage.followUps && chatMessage.followUps.length > 0 && (

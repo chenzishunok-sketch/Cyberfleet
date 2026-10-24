@@ -22,6 +22,8 @@ import type {
   WorkflowListResponse,
   WorkflowHistoryItem,
   OfficeSnapshot,
+  ScheduledTask,
+  ScheduledTaskRunLog,
 } from "../shared/contracts";
 import type { ContentAsset, ContentOverview, ContentTask } from "../shared/content";
 import type { IntelligenceOverview, IntelligenceScope, KnowledgeCategory, KnowledgeEntry, KnowledgeMatch, PromptRule, WebSearchInput, WebSearchResponse } from "../shared/intelligence";
@@ -97,7 +99,15 @@ export const api = {
       buffer = lines.pop() ?? "";
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue;
-        const event = JSON.parse(line.slice(6)) as ChatStreamEvent;
+        // 一行坏数据不该把整条流打断：跳过它，继续读后面的增量。
+        // 以前这里裸 parse，遇到半个 JSON（连接被掐断）就整个请求失败，已经收到的字也白丢了。
+        let event: ChatStreamEvent;
+        try {
+          event = JSON.parse(line.slice(6)) as ChatStreamEvent;
+        } catch {
+          console.warn("[api] 跳过无法解析的流式事件:", line.slice(0, 120));
+          continue;
+        }
         if (event.type === "final") finalResponse = event.response;
         else if (event.type === "error") streamError = event.message;
         else onEvent(event);
@@ -109,8 +119,14 @@ export const api = {
   },
   approve: (actionId: string) => request<ActionResponse>(`/api/actions/${actionId}/approve`, { method: "POST" }),
   reject: (actionId: string) => request<{ plan: { status: string } }>(`/api/actions/${actionId}/reject`, { method: "POST" }),
-  toggleAutomation: (automationId: string) =>
-    request<{ automation: DashboardSnapshot["automations"][number] }>(`/api/automations/${automationId}/toggle`, { method: "POST" }),
+  // 定时任务：读真实调度引擎。以前界面读的是 dashboard.automations，真实模式下它恒为空，
+  // 于是后台跑着 5 个任务、界面却显示「0 项」。
+  schedulerTasks: () => request<{ tasks: ScheduledTask[] }>("/api/scheduler/tasks"),
+  schedulerLogs: (limit = 50) => request<{ logs: ScheduledTaskRunLog[] }>(`/api/scheduler/logs?limit=${encodeURIComponent(String(limit))}`),
+  runScheduledTask: (id: string) => request<ScheduledTaskRunLog>(`/api/scheduler/tasks/${encodeURIComponent(id)}/run`, { method: "POST" }),
+  pauseScheduledTask: (id: string) => request<ScheduledTask>(`/api/scheduler/tasks/${encodeURIComponent(id)}/pause`, { method: "POST" }),
+  resumeScheduledTask: (id: string) => request<ScheduledTask>(`/api/scheduler/tasks/${encodeURIComponent(id)}/resume`, { method: "POST" }),
+  deleteScheduledTask: (id: string) => request<{ deleted: boolean }>(`/api/scheduler/tasks/${encodeURIComponent(id)}`, { method: "DELETE" }),
   health: () => request<HealthResponse>("/api/health"),
   contentOverview: () => request<ContentOverview>("/api/content"),
   intelligenceOverview: () => request<IntelligenceOverview>("/api/intelligence"),

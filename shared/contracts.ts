@@ -49,6 +49,38 @@ export interface Automation {
   kind: "report" | "alert";
 }
 
+/**
+ * 调度器里真实运行的定时任务。
+ *
+ * 这是定时任务的唯一数据源（/api/scheduler/tasks）。dashboard 快照里曾经还有一个
+ * `automations` 字段，但它永远是空数组，界面读它才会出现「后台 5 个任务、界面 0 项」。
+ * 那个字段已删除，避免再被误当成任务列表。
+ */
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  description?: string;
+  /** 5 字段 cron：分 时 日 月 周 */
+  cron: string;
+  type: "read_only_query" | "proactive_inspection" | "report_generation" | "learning_reflection";
+  status: "active" | "paused" | "error";
+  agent?: string;
+  lastRunAt?: string;
+  lastResult?: { success: boolean; summary: string; insight?: string };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduledTaskRunLog {
+  taskId: string;
+  taskName: string;
+  runAt: string;
+  success: boolean;
+  summary: string;
+  insight?: string;
+  durationMs: number;
+}
+
 export interface ActivityItem {
   id: string;
   title: string;
@@ -62,7 +94,6 @@ export interface DashboardSnapshot {
   metrics: Metric[];
   salesSeries: SalesPoint[];
   products: ProductRow[];
-  automations: Automation[];
   activity: ActivityItem[];
   alerts: Array<{ id: string; level: "warning" | "info"; text: string }>;
   dataAsOf: string;

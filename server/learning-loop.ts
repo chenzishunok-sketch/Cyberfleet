@@ -88,7 +88,15 @@ class LearningLoopStore {
       const path = loopPath();
       if (existsSync(path)) {
         const raw = readFileSync(path, "utf-8");
-        this.data = JSON.parse(raw);
+        const parsed: unknown = JSON.parse(raw);
+        // 同上：null / 数组也能 parse 成功，但后续取 .decisions 会抛错；
+        // 缺字段的老文件也要补齐，否则第一次 push 就崩
+        const record = (parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}) as Partial<LearningLoopData>;
+        this.data = {
+          decisions: Array.isArray(record.decisions) ? record.decisions : [],
+          outcomes: Array.isArray(record.outcomes) ? record.outcomes : [],
+          reflections: Array.isArray(record.reflections) ? record.reflections : [],
+        };
       }
     } catch {
       this.data = { decisions: [], outcomes: [], reflections: [] };
