@@ -390,8 +390,9 @@ export function createApp() {
       response.write(": heartbeat\n\n");
     }, 30_000);
 
-    // 清理
-    request.on("close", () => {
+    // 清理：听 response 的 close，而不是 request 的——POST/带请求体的场景下
+    // request 的 close 会在请求体读完后立刻触发，那样监听器会被过早摘掉。
+    response.on("close", () => {
       clearInterval(snapshotInterval);
       clearInterval(heartbeat);
       agentBus.off("agent:message", onMessage);
@@ -1126,9 +1127,15 @@ export function createApp() {
     response.setHeader("X-Accel-Buffering", "no");
     response.flushHeaders?.();
 
-    // 客户端断开（关页面/刷新/点「停止」）时记下来，避免继续往死连接写
+    // 客户端断开（关页面/刷新/点「停止」）时记下来，避免继续往死连接写。
+    // 注意：不能听 request 的 close——POST 的请求体被 express.json() 读完后请求流就被销毁，
+    // 该事件在 40ms 左右立刻触发，会把整轮对话的所有事件（含 final）全部当成「已断开」丢掉，
+    // 而且 finally 里的 response.end() 也不会执行。要听 response 的 close，
+    // 并用 writableEnded 区分「我们主动收尾」和「客户端提前跑了」。
     let streamClosed = false;
-    request.on("close", () => { streamClosed = true; });
+    response.on("close", () => {
+      if (!response.writableEnded) streamClosed = true;
+    });
 
     const send = (event: { type: string } & Record<string, unknown>) => {
       // 连接断开后继续 write 会触发 ERR_STREAM_WRITE_AFTER_END，
@@ -1142,13 +1149,51 @@ export function createApp() {
       }
     };
 
+    // 心跳：模型思考或工具跑接口期间可能十几秒没有事件，
+    // 有字节持续流动才能让浏览器和中间代理知道连接还活着。
+    const heartbeat = setInterval(() => {
+      if (!streamClosed) response.write(": ping\n\n");
+    }, 15_000);
+
+    // 模型是逐 token 推的，一片往往只有 1-2 个字。若每片都发一条 SSE，
+    // 一次 1000 字的回答会产生七八百条消息，前端也要跟着重渲染七八百次。
+    // 这里按「攒够 12 字」或「距上次推送满 60ms」合并：观感仍是逐字出现，消息数少一个数量级。
+    const DELTA_FLUSH_CHARS = 12;
+    const DELTA_FLUSH_MS = 60;
+    let pendingDelta = "";
+    let deltaTimer: NodeJS.Timeout | undefined;
+    const flushDelta = () => {
+      if (deltaTimer) { clearTimeout(deltaTimer); deltaTimer = undefined; }
+      if (!pendingDelta) return;
+      const delta = pendingDelta;
+      pendingDelta = "";
+      send({ type: "content_delta", delta });
+    };
+    const pushDelta = (delta: string) => {
+      pendingDelta += delta;
+      if (pendingDelta.length >= DELTA_FLUSH_CHARS) { flushDelta(); return; }
+      if (!deltaTimer) deltaTimer = setTimeout(flushDelta, DELTA_FLUSH_MS);
+    };
+    // 非增量事件必须先把手里的字冲出去，否则「后发生的事件」会跑到「先出现的字」前面
+    const emit = (event: { type: string } & Record<string, unknown>) => {
+      if (event.type === "content_delta") { pushDelta(String(event.delta ?? "")); return; }
+      // 服务端要重写这句回答时，没来得及发的旧内容必须丢掉，否则会和重写后的文字粘在一起
+      if (event.type === "content_reset") pendingDelta = "";
+      flushDelta();
+      send(event);
+    };
+
     try {
-      const result = await handleChat(parsed.data, (e) => send(e));
+      const result = await handleChat(parsed.data, emit);
+      flushDelta();
       send({ type: "final", response: result });
     } catch (error) {
+      flushDelta();
       send({ type: "error", message: error instanceof Error ? error.message : "处理指令失败。" });
     } finally {
-      if (!streamClosed) response.end();
+      if (deltaTimer) clearTimeout(deltaTimer);
+      clearInterval(heartbeat);
+      if (!response.writableEnded) response.end();
     }
   });
 

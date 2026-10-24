@@ -10,6 +10,7 @@ import { getChuhaijiangAbilityDescription } from "./chuhaijiang-client.ts";
 import { intelligenceStore } from "./intelligence-store.ts";
 import { agentRegistry } from "./agent-registry.ts";
 import { isShellAnswer, normalizeAssistantText } from "./response-presentation.ts";
+import { extractPartialStringField } from "./partial-json.ts";
 
 export type AgentDecision =
   | { tool: "get_shop_info"; args: Record<string, never> }
@@ -38,7 +39,9 @@ export type AgentDecision =
   | { tool: "delegate_to_agent"; args: { targetAgent: string; task: string; context?: string } }
   | { tool: "respond"; args: { content: string; followUps?: string[] } };
 
-const tools = [
+// 导出是为了让测试和基准脚本能量到「工具清单本身」的成本：
+// 这 23 条 schema 每次 ReAct 迭代都会随请求重发，是上下文里最大的固定开销。
+export const tools = [
   {
     type: "function",
     function: {
@@ -359,6 +362,13 @@ interface LlmCallOptions {
   // 流式模式：逐 token 回调，用于最终回答的打字机效果
   stream?: boolean;
   onToken?: (delta: string) => void;
+  /**
+   * 模型正在写 respond 的正文时，把 arguments 里已经生成的增量逐片吐出来。
+   *
+   * 主循环里正文藏 tool_call 的 arguments 中，而 arguments 是边生成边到达的
+   * （实测一次回答分 300 多片）。不接这个回调，用户就要等整段写完才看到第一个字。
+   */
+  onRespondDelta?: (delta: string) => void;
   // 强制模型以 JSON 对象返回（OpenAI response_format）
   responseFormat?: "json";
   // DeepSeek v4 思考开关：显式 "disabled" 用于简单结构化生成任务——
@@ -435,7 +445,7 @@ export async function callLlmRaw(options: LlmCallOptions): Promise<{
       // 成功：处理响应（流式或非流式）
       if (options.stream && response.body) {
         let content = "";
-        const toolCallBuffers: Array<{ id: string; name: string; args: string }> = [];
+        const toolCallBuffers: Array<{ id: string; name: string; args: string; streamedChars: number }> = [];
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
@@ -459,10 +469,22 @@ export async function callLlmRaw(options: LlmCallOptions): Promise<{
             }
             if (delta.tool_calls) {
               for (const tc of delta.tool_calls) {
-                if (!toolCallBuffers[tc.index]) toolCallBuffers[tc.index] = { id: tc.id ?? "", name: tc.function?.name ?? "", args: "" };
+                if (!toolCallBuffers[tc.index]) toolCallBuffers[tc.index] = { id: tc.id ?? "", name: tc.function?.name ?? "", args: "", streamedChars: 0 };
                 if (tc.id) toolCallBuffers[tc.index].id = tc.id;
                 if (tc.function?.name) toolCallBuffers[tc.index].name = tc.function.name;
-                if (tc.function?.arguments) toolCallBuffers[tc.index].args += tc.function.arguments;
+                if (tc.function?.arguments) {
+                  const slot = toolCallBuffers[tc.index];
+                  slot.args += tc.function.arguments;
+                  // 边写边推：正文还在 arguments 里生成时就把已到手的部分交给前端。
+                  // 只对 respond 生效——其他工具的参数是给系统看的，推给用户没有意义。
+                  if (options.onRespondDelta && slot.name === "respond") {
+                    const text = extractPartialStringField(slot.args, "content");
+                    if (text !== undefined && text.length > slot.streamedChars) {
+                      options.onRespondDelta(text.slice(slot.streamedChars));
+                      slot.streamedChars = text.length;
+                    }
+                  }
+                }
               }
             }
           }
@@ -743,6 +765,12 @@ export async function reactLoop(
       break;
     }
     const llmStartedAt = Date.now();
+    // 这一步已经流给前端的正文字数。模型把回答写在 respond 的 arguments 里，
+    // 现在参数是边生成边到达的，接住就能让用户提前几秒看到字。
+    let streamedAnswer = "";
+    const streamDelta = onToken
+      ? (delta: string) => { streamedAnswer += delta; onToken(delta); }
+      : undefined;
     const result = await callLlmRaw({
       messages,
       // 稳定前缀优先，命中 prefix cache；role/memory 放后面
@@ -751,6 +779,10 @@ export async function reactLoop(
       toolChoice: "required",
       model: fastModel(),
       maxTokens: step === 0 ? 360 : 900,
+      // 只有能接流的地方才开流式：没有 onToken 时保持一次性返回，少一次解析开销
+      stream: Boolean(onToken),
+      onToken: streamDelta,
+      onRespondDelta: streamDelta,
     });
     // 耗时打点：用户体感「慢」时，只有这行能区分是模型慢还是接口慢
     console.info(`[perf] react step ${step + 1} llm=${Date.now() - llmStartedAt}ms tools=${result.allToolCalls?.length ?? (result.toolName ? 1 : 0)}`);
@@ -773,6 +805,8 @@ export async function reactLoop(
           // 不替它写（模板改写过一次，结果答非所问），而是把这句话摔回去让它自己重写。
           shellRetried = true;
           console.warn(`[ReAct] 第 ${step + 1} 步：已有 ${steps.length} 步数据，模型只回了「${inlineAnswer.trim().slice(0, 20)}」，要求重写`);
+          // 这句空壳已经边生成边推给用户了，先擦掉再重写，否则两段文字会接在一起
+          if (streamedAnswer) onReset?.();
           messages.push({ role: "assistant", content: inlineAnswer.trim() || "（无内容）" });
           messages.push({ role: "user", content: SHELL_REWRITE_PROMPT });
           continue;
@@ -781,6 +815,7 @@ export async function reactLoop(
         // 并明确告诉用户这是原始数据、不是模型结论 —— 无论如何不能把「已分析」透传出去。
         console.warn(`[ReAct] 第 ${step + 1} 步：重写后仍是空壳「${inlineAnswer.trim().slice(0, 20)}」，改用数据兜底`);
         const fallback = summarizeCollectedData(steps);
+        if (streamedAnswer) onReset?.();
         if (onToken) await streamOutExisting(fallback, onToken);
         const fallbackDecision: AgentDecision = { tool: "respond", args: { content: fallback, followUps: [] } };
         steps.push({ decision: fallbackDecision, observation: "" });
@@ -793,10 +828,10 @@ export async function reactLoop(
           followUps: Array.isArray(result.toolArgs?.followUps) ? result.toolArgs.followUps as string[] : [],
         },
       };
-      // 主循环里 tool_choice 是 required，模型只能把回答塞进 tool call 的 arguments，
-      // delta.content 恒为空 —— 前端一个字都收不到，用户等几十秒后整段突然出现。
-      // 这里把已经生成好的文字分块推下去，等待期间至少能看到在出字。
-      if (onToken) await streamOutExisting(normalizeAssistantText(decision.args.content), onToken);
+      // 模型把正文写在 tool call 的 arguments 里（tool_choice=required 下 delta.content 恒空）。
+      // 上面已经把 arguments 中的正文边生成边推给前端；只有没推成（比如模型直接返回 content）
+      // 才走这里的分块补发，避免同一段文字被推两遍。
+      if (onToken && !streamedAnswer) await streamOutExisting(normalizeAssistantText(decision.args.content), onToken);
       steps.push({ decision, observation: "" });
       return { finalDecision: decision, steps };
     }
@@ -837,7 +872,7 @@ export async function reactLoop(
       messages.push({
         role: "tool",
         tool_call_id: call.callId,
-        content: `工具 ${call.name} 的执行结果：\n${observation}`,
+        content: `工具 ${call.name} 的执行结果：\n${truncateObservationForModel(observation)}`,
       });
       return observation;
     }));
@@ -914,6 +949,21 @@ export async function reactLoop(
   const finalDecision: AgentDecision = { tool: "respond", args: { content: answer, followUps: [] } };
   steps.push({ decision: finalDecision, observation: "" });
   return { finalDecision, steps };
+}
+
+/**
+ * 工具结果进模型上下文前先截断。
+ *
+ * 有些工具（尤其是 MCP 搜索类）一次能返回几十 KB 的 JSON。原样塞回 messages，
+ * 每一步都把上下文再撑大一截：既慢又贵，而模型真正需要知道的只是「有几条、长什么样」。
+ * 注意只截喂给模型的那一份，steps 里保留全文，前端渲染和兜底总结不受影响。
+ */
+const TOOL_OBSERVATION_LIMIT = 1_200;
+
+function truncateObservationForModel(observation: string): string {
+  if (observation.length <= TOOL_OBSERVATION_LIMIT) return observation;
+  const omitted = observation.length - TOOL_OBSERVATION_LIMIT;
+  return `${observation.slice(0, TOOL_OBSERVATION_LIMIT)}\n…（本次结果共 ${observation.length} 字，已省略后 ${omitted} 字；需要更多细节请缩小查询范围再查一次）`;
 }
 
 /**

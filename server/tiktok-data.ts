@@ -273,7 +273,10 @@ const regionMetadata: Record<string, { label: string; currency: string; timezone
   ID: { label: "印度尼西亚", currency: "IDR", timezone: "Asia/Jakarta" },
 };
 
-const cache = new Map<string, { expiresAt: number; promise: Promise<TikTokOperationalData> }>();
+// 快照缓存：值 + 过期时间。过期后不删，留着当「上一份」先顶上（见 getTikTokOperationalData）。
+const cache = new Map<string, { value: TikTokOperationalData; expiresAt: number }>();
+// 正在进行的拉取：并发请求共享同一次，避免同时打多轮接口
+const inFlight = new Map<string, Promise<TikTokOperationalData>>();
 const MAX_PAGINATION_PAGES = 1_000;
 
 // 商品详情（主图/类目/SKU 规格名）短期不会变，但接口是逐个商品查的：
@@ -945,6 +948,8 @@ async function fetchOperationalData(days: number, withProductMetadata: boolean):
 // 全量数据（约 12 秒），一次对话因此能拖到 100 秒以上。
 // 平台本身的数据就有 T+1 延迟，几分钟内复用不会让结论失真。
 const SNAPSHOT_TTL_MS = Math.max(30_000, Number(process.env.TIKTOK_SNAPSHOT_TTL_MS ?? "") || 5 * 60 * 1000);
+// 刷新失败后的退避时长：这段时间继续用上一份，不重复打接口
+const SNAPSHOT_RETRY_MS = 30_000;
 
 export async function getTikTokOperationalData(
   days = 7,
@@ -957,14 +962,41 @@ export async function getTikTokOperationalData(
   // 前端商品卡片会突然集体没图。
   const withProductMetadata = options.withProductMetadata !== false;
   const key = `${shop.id}:${safeDays}:${withProductMetadata ? "meta" : "plain"}`;
+
   const existing = cache.get(key);
-  if (existing && existing.expiresAt > Date.now()) return existing.promise;
-  const promise = fetchOperationalData(safeDays, withProductMetadata).catch((error) => {
-    cache.delete(key);
-    throw error;
-  });
-  cache.set(key, { expiresAt: Date.now() + SNAPSHOT_TTL_MS, promise });
-  return promise;
+  if (existing && existing.expiresAt > Date.now()) return existing.value;
+
+  // 过期了但手上还有上一份：先把旧数据给用户，刷新放到后台。
+  // 一次冷拉取实测要 11 秒（订单接口两个区间各要翻完所有分页），
+  // 而平台数据本身就有 T+1 延迟——为了几分钟的「新鲜度」让用户干等十几秒不划算。
+  if (existing) {
+    void refreshSnapshot(key, safeDays, withProductMetadata).catch((error) => {
+      console.warn(`[TikTok 快照后台刷新失败，继续沿用上一份] ${error instanceof Error ? error.message : error}`);
+    });
+    return existing.value;
+  }
+
+  return refreshSnapshot(key, safeDays, withProductMetadata);
+}
+
+/** 同一份快照同一时刻只拉一次，并发请求共享同一个 promise */
+function refreshSnapshot(key: string, days: number, withProductMetadata: boolean): Promise<TikTokOperationalData> {
+  const running = inFlight.get(key);
+  if (running) return running;
+  const task = fetchOperationalData(days, withProductMetadata)
+    .then((value) => {
+      cache.set(key, { value, expiresAt: Date.now() + SNAPSHOT_TTL_MS });
+      return value;
+    })
+    .catch((error) => {
+      // 失败就退避：把这份的过期时间往后推一点，避免接口抖动时每个请求都重打一轮
+      const stale = cache.get(key);
+      if (stale) cache.set(key, { value: stale.value, expiresAt: Date.now() + SNAPSHOT_RETRY_MS });
+      throw error;
+    })
+    .finally(() => { inFlight.delete(key); });
+  inFlight.set(key, task);
+  return task;
 }
 
 export async function getCurrentDashboard(): Promise<DashboardSnapshot> {
@@ -989,5 +1021,6 @@ export async function getShopDisplayInfo(): Promise<{ name: string; region: stri
 
 export function clearTikTokDataCache(): void {
   cache.clear();
+  inFlight.clear();
   productMetadataCache.clear();
 }
