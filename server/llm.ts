@@ -9,6 +9,7 @@ import { getFastMossAbilityDescription, getFastMossTools } from "./mcp-client.ts
 import { getChuhaijiangAbilityDescription } from "./chuhaijiang-client.ts";
 import { intelligenceStore } from "./intelligence-store.ts";
 import { agentRegistry } from "./agent-registry.ts";
+import { isShellAnswer, normalizeAssistantText } from "./response-presentation.ts";
 
 export type AgentDecision =
   | { tool: "get_shop_info"; args: Record<string, never> }
@@ -689,6 +690,8 @@ const AGENT_SYSTEM_PROMPT = `你是 TikTok Shop 的智能运营 Agent。你可�
 - 同一个只读工具在同一次对话里只调用一次。get_sales_overview 已经包含订单、GMV、退款、客单价四项指标，
   不要再用 get_order_summary、get_gmv_summary、get_refund_summary 重复取同一份数据；list_products 也不要反复调用。
   重复调用拿不到新数据，只会让用户多等几十秒
+- 同一次对话里所有查询工具必须使用同一个 days。不同 days 会各自触发一次全量拉取，每次多等半分钟以上。
+  用户没说天数时一律用 7；只有用户明确说"30 天""近一个月"才用 30
 - 当收集到足够信息后，必须使用 respond 工具给出最终回答，不要只停留在查数据阶段
 - 最终回答最低标准：长度不少于 80 个中文字；如果生成了更短的回答，视为回答不完整，需要补充分析和建议
 - 如果你是运营总监 Agent，遇到需要专业领域执行的任务（如定价计算、达人筛选、上架发布），可以使用 delegate_to_agent 工具把子任务委派给对应的专业 Agent，然后基于委派结果给出综合回答`;
@@ -700,6 +703,8 @@ export async function reactLoop(
   maxSteps = 5,
   onStep?: (decision: AgentDecision, observation: string, index: number, failed: boolean) => void,
   onToken?: (delta: string) => void,
+  /** 丢弃已经推送的流式正文。空壳回答被打回重写时调用，避免两段文字接在一起 */
+  onReset?: () => void,
 ): Promise<{ finalDecision: AgentDecision; steps: ReactStepResult[] }> {
   const memory = memoryContext ?? "";
   const messages: ChatMessage[] = [
@@ -718,42 +723,85 @@ export async function reactLoop(
   const chuhaijiangAbility = await getChuhaijiangAbilityDescription();
 
   const steps: ReactStepResult[] = [];
-  const reasoningModel = needsDeliberateReasoning(request.message) ? undefined : fastModel();
+  // 主循环每一步只做一件事：决定下一批调哪个工具。这是分类任务，快模型足够。
+  // 真正需要深思的是最后的总结，所以强模型留给那一步——
+  // 以前这里让主循环也用强模型，「帮我分析店铺」这种请求光选工具就花掉十几秒。
+  const summaryModel = needsDeliberateReasoning(request.message) ? undefined : fastModel();
   // 时间预算：没有这道闸，模型可以一路查下去，用户端能等到 100 秒以上还没出字。
   // 超出预算就跳出循环，直接进入「用已有数据总结」那一段，保证一定会给出回答。
   const budgetMs = Math.max(20_000, Number(process.env.REACT_BUDGET_MS ?? "") || 70_000);
   const startedAt = Date.now();
+  // 空壳回答只打回一次。不设这个开关，模型如果反复回「已分析」，会一路重写到步数耗尽。
+  let shellRetried = false;
+  // 已经真正执行过的「工具 + 参数」组合，用于拦下重复查询
+  const calledTools = new Set<string>();
+  let redundantCalls = 0;
 
   for (let step = 0; step < maxSteps; step++) {
     if (steps.length > 0 && Date.now() - startedAt > budgetMs) {
       console.warn(`[ReAct] 已用 ${Math.round((Date.now() - startedAt) / 1000)}s，超出 ${Math.round(budgetMs / 1000)}s 预算，提前收敛`);
       break;
     }
+    const llmStartedAt = Date.now();
     const result = await callLlmRaw({
       messages,
       // 稳定前缀优先，命中 prefix cache；role/memory 放后面
       systemPrompt: AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + chuhaijiangAbility + agentRolePrompt(request) + memory,
       toolDefs: filteredTools,
       toolChoice: "required",
-      model: reasoningModel ?? (step === 0 ? fastModel() : undefined),
+      model: fastModel(),
       maxTokens: step === 0 ? 360 : 900,
     });
+    // 耗时打点：用户体感「慢」时，只有这行能区分是模型慢还是接口慢
+    console.info(`[perf] react step ${step + 1} llm=${Date.now() - llmStartedAt}ms tools=${result.allToolCalls?.length ?? (result.toolName ? 1 : 0)}`);
 
-    if (!result.toolName || !result.toolCallId) {
+    // 模型这一步想「结束对话」时的正文：
+    //  · 没调工具（无 toolName）→ 正文就是回答
+    //  · 调了 respond → 回答在 toolArgs.content 里，不能读 result.content
+    //    这个字段在 tool_calls 响应里恒为 undefined，读错就会拿兜底文案顶替模型的真实分析
+    const inlineAnswer = !result.toolName || !result.toolCallId
+      ? result.content
+      : result.toolName === "respond"
+        ? (typeof result.toolArgs?.content === "string" ? result.toolArgs.content : result.content)
+        : undefined;
+
+    if (inlineAnswer !== undefined) {
+      const hasData = steps.some((s) => s.observation && !s.failed);
+      if (hasData && isShellAnswer(inlineAnswer)) {
+        if (!shellRetried) {
+          // 已查到数据却只回「已分析」：这不是回答，是把几十秒的等待吞掉。
+          // 不替它写（模板改写过一次，结果答非所问），而是把这句话摔回去让它自己重写。
+          shellRetried = true;
+          console.warn(`[ReAct] 第 ${step + 1} 步：已有 ${steps.length} 步数据，模型只回了「${inlineAnswer.trim().slice(0, 20)}」，要求重写`);
+          messages.push({ role: "assistant", content: inlineAnswer.trim() || "（无内容）" });
+          messages.push({ role: "user", content: SHELL_REWRITE_PROMPT });
+          continue;
+        }
+        // 打回过一次还是空壳：不再跟它耗。用已查到的真实数据兜底，
+        // 并明确告诉用户这是原始数据、不是模型结论 —— 无论如何不能把「已分析」透传出去。
+        console.warn(`[ReAct] 第 ${step + 1} 步：重写后仍是空壳「${inlineAnswer.trim().slice(0, 20)}」，改用数据兜底`);
+        const fallback = summarizeCollectedData(steps);
+        if (onToken) await streamOutExisting(fallback, onToken);
+        const fallbackDecision: AgentDecision = { tool: "respond", args: { content: fallback, followUps: [] } };
+        steps.push({ decision: fallbackDecision, observation: "" });
+        return { finalDecision: fallbackDecision, steps };
+      }
       const decision: AgentDecision = {
         tool: "respond",
-        args: { content: result.content ?? "任务完成。", followUps: [] },
+        args: {
+          content: typeof inlineAnswer === "string" ? inlineAnswer : "",
+          followUps: Array.isArray(result.toolArgs?.followUps) ? result.toolArgs.followUps as string[] : [],
+        },
       };
+      // 主循环里 tool_choice 是 required，模型只能把回答塞进 tool call 的 arguments，
+      // delta.content 恒为空 —— 前端一个字都收不到，用户等几十秒后整段突然出现。
+      // 这里把已经生成好的文字分块推下去，等待期间至少能看到在出字。
+      if (onToken) await streamOutExisting(normalizeAssistantText(decision.args.content), onToken);
       steps.push({ decision, observation: "" });
       return { finalDecision: decision, steps };
     }
 
     const decision = { tool: result.toolName as AgentDecision["tool"], args: result.toolArgs ?? {} } as AgentDecision;
-
-    if (decision.tool === "respond") {
-      steps.push({ decision, observation: "" });
-      return { finalDecision: decision, steps };
-    }
 
     // 并行执行：LLM 可能在一步返回多个互不依赖的只读工具调用
     const allCalls = result.allToolCalls ?? [{ name: result.toolName!, args: result.toolArgs ?? {}, callId: result.toolCallId! }];
@@ -765,6 +813,19 @@ export async function reactLoop(
       const callDecision = { tool: call.name as AgentDecision["tool"], args: call.args } as AgentDecision;
       let observation: string;
       let failed = false;
+      // 同一个工具 + 同一组参数重复调用拿不到任何新数据，只会让用户多等一轮。
+      // 真实场景：分析类请求里模型查完销售额又去查经营报告（同一份数据源），白等 7 秒。
+      // 这里不真跑，改成一句提示塞回去，模型下一步基本都会直接给结论。
+      const callKey = `${call.name}:${JSON.stringify(call.args ?? {})}`;
+      if (calledTools.has(callKey)) {
+        redundantCalls += 1;
+        observation = "这个查询刚刚已经做过，结果就在上面的工具返回里，没有新数据。不要重复调用，请直接基于已有数据回答用户。";
+        steps.push({ decision: callDecision, observation, failed: false });
+        onStep?.(callDecision, observation, steps.length - 1, false);
+        messages.push({ role: "tool", tool_call_id: call.callId, content: observation });
+        return observation;
+      }
+      calledTools.add(callKey);
       try {
         observation = await toolExecutor(callDecision);
       } catch (error) {
@@ -781,34 +842,132 @@ export async function reactLoop(
       return observation;
     }));
 
+    // 连续两次被提示「已经查过」说明模型在原地打转，再让它试一步只会更慢，直接去总结
+    if (redundantCalls >= 2) {
+      console.warn("[ReAct] 模型在重复查询已有数据，提前进入总结");
+      break;
+    }
+
     // 单工具时保持 decision 指向该工具；多工具时 decision 指向第一个（用于后续渲染）
     void observations;
   }
 
-  // 超过最大步数，强制要求 LLM 总结
+  // ── 最终总结 ──
+  // 这一步不给工具：回答只需要文字，不需要再调一次接口。
+  // 以前这里是 tool_choice: "required"，模型只能把回答塞进 respond 的 arguments，
+  // 而 arguments 走的是 tool_calls 而不是 delta.content —— 流式一个字都推不出来，
+  // 前端只能干等几十秒；最后的 finalResult.content 同样是 undefined（正文在 toolArgs 里），
+  // 于是退回「已完成分析。」这句兜底。用户看到的就是"只说已分析、不给结果"。
   messages.push({
     role: "user",
-    content: "你已经完成了所有必要的查询步骤。现在请使用 respond 工具，根据已获取的所有数据给出最终回答。",
+    content: "查询阶段已经结束。现在不要调用任何工具，直接用文字回答用户最初的问题：第一句给结论，再说依据，最后给 1~2 条具体建议。只输出回答正文。",
   });
 
-  const finalResult = await callLlmRaw({
-    messages,
-    systemPrompt: AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + chuhaijiangAbility + memory,
-    toolDefs: filteredTools,
-    toolChoice: "required",
-    model: reasoningModel,
-    maxTokens: 900,
-    // 最终回答走流式：逐 token 推送给前端，实现打字机效果
-    stream: Boolean(onToken),
-    onToken,
-  });
+  const finalSystemPrompt = AGENT_SYSTEM_PROMPT + skillAbility + fastmossAbility + chuhaijiangAbility + memory;
+  let answer = "";
 
-  const finalDecision: AgentDecision = finalResult.toolName && finalResult.toolName !== "respond"
-    ? { tool: "respond", args: { content: finalResult.content ?? "已完成多步分析，请查看上方结果。", followUps: [] } }
-    : { tool: "respond", args: { content: finalResult.content ?? "已完成分析。", followUps: [] } };
+  try {
+    const summarizeStartedAt = Date.now();
+    const finalResult = await callLlmRaw({
+      messages,
+      systemPrompt: finalSystemPrompt,
+      model: summaryModel,
+      maxTokens: 900,
+      // 没有 tool_choice 时 DeepSeek v4 默认开思考模式，这里显式关掉：总结要的是快
+      thinking: "disabled",
+      stream: Boolean(onToken),
+      onToken,
+    });
+    answer = finalResult.content?.trim() ?? "";
+    console.info(`[perf] react summary llm=${Date.now() - summarizeStartedAt}ms chars=${answer.length}`);
+  } catch (error) {
+    // 总结失败不该把整轮对话打成错误：前面查到的数据还在，下面会用它兜底
+    console.warn("[ReAct] 最终总结失败，改用已查到的数据兜底：", error instanceof Error ? error.message : error);
+  }
 
+  const hasData = steps.some((s) => s.observation && !s.failed);
+
+  // 空壳回答不接受：已经查到数据却只回一句「已分析」，等于把用户的等待吞掉。
+  // 处理方式是把它打回让模型自己重写，不是拿固定模板替它写（模板改写做过一次，结果答非所问）。
+  if (hasData && isShellAnswer(answer)) {
+    console.warn(`[ReAct] 最终总结是空壳「${answer.slice(0, 20)}」，要求重写`);
+    onReset?.();
+    try {
+      const retry = await callLlmRaw({
+        messages: [...messages, { role: "user", content: SHELL_REWRITE_PROMPT }],
+        systemPrompt: finalSystemPrompt,
+        model: summaryModel,
+        maxTokens: 900,
+        thinking: "disabled",
+        stream: Boolean(onToken),
+        onToken,
+      });
+      const retried = retry.content?.trim() ?? "";
+      if (!isShellAnswer(retried)) answer = retried;
+    } catch (error) {
+      console.warn("[ReAct] 重写最终总结失败：", error instanceof Error ? error.message : error);
+    }
+  }
+
+  if (isShellAnswer(answer)) answer = summarizeCollectedData(steps);
+
+  const finalDecision: AgentDecision = { tool: "respond", args: { content: answer, followUps: [] } };
   steps.push({ decision: finalDecision, observation: "" });
   return { finalDecision, steps };
+}
+
+/**
+ * 把一段已经生成好的文字按小块推给前端。
+ *
+ * 用在模型已经一次性给出整段回答、但正文藏在 tool call arguments 里的场合：
+ * 真流式拿不到 token，又不能让用户对着空白等几十秒，所以按 16 字一块补发。
+ * 推的是模型原文，不改一个字，最终落账仍以 final 事件里的完整消息为准。
+ */
+async function streamOutExisting(text: string, onToken: (delta: string) => void): Promise<void> {
+  if (!text) return;
+  const chunkSize = 16;
+  // 总时长控制在 1.2 秒以内：块越多等越久，长回答按比例放大块大小
+  const delay = Math.max(4, Math.min(14, Math.round(1_200 / Math.ceil(text.length / chunkSize))));
+  for (let index = 0; index < text.length; index += chunkSize) {
+    onToken(text.slice(index, index + chunkSize));
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
+
+/** 空壳回答打回时用的指令。只描述「这个回答不合格」，不提示具体该写什么内容 */const SHELL_REWRITE_PROMPT = "你上一条回答只是在确认动作，没有给用户任何可用内容。用户要的是结果本身。请直接基于上面工具返回的真实数据回答：第一句给结论，再说依据，最后给 1~2 条具体建议。禁止再说「已分析」「已完成」「请查看上方」这类话。";
+
+/** 工具名 → 用户看得懂的数据名称，兜底列数据时用 */
+const TOOL_ANSWER_LABELS: Record<string, string> = {
+  get_shop_info: "店铺信息",
+  get_sales_overview: "销售概览",
+  get_order_summary: "订单汇总",
+  get_gmv_summary: "GMV 汇总",
+  get_refund_summary: "退款汇总",
+  list_products: "商品列表",
+  explain_product_operations: "商品操作能力",
+  generate_operations_report: "经营报告",
+  run_tiktok_scene_query: "TikTok 场景查询",
+  analyze_category_track: "类目赛道分析",
+  get_workflow_status: "任务状态",
+  get_kol_bridge_status: "达人插件状态",
+  list_kol_creators: "达人库",
+  get_kol_stats: "建联数据",
+};
+
+/**
+ * 模型始终没给出结论时的最后一道兜底：把已经查到的真实数据原样列出来，并说明这不是分析结论。
+ * 宁可给一份标明来源的原始数据，也不要再回一句「已完成分析」把数据吞掉。
+ */
+function summarizeCollectedData(steps: ReactStepResult[]): string {
+  const withData = steps.filter((s) => s.observation && !s.failed);
+  if (!withData.length) {
+    return "这次没有取到可用数据，也没有生成结论。请换一种更具体的问法，或稍后重试。";
+  }
+  const blocks = withData.slice(-3).map((s) => {
+    const label = TOOL_ANSWER_LABELS[s.decision.tool] ?? s.decision.tool;
+    return `【${label}】\n${s.observation.slice(0, 800)}`;
+  });
+  return `这次模型只回了一句确认，没有给出分析结论。下面是已经查到的真实数据，可以直接核对；也可以点重试，让我把它们整理成结论。\n\n${blocks.join("\n\n")}`;
 }
 
 // ─── 记忆提取 ──────────────────────────────────────────────────

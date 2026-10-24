@@ -130,11 +130,15 @@ export class TikTokShopClient {
       throw new TikTokTransientError("连接 TikTok Shop API 超时，请稍后重试。");
     }
 
+    // 先读文本再解析：直接 response.json() 失败时拿不到任何线索，
+    // 只能报"无法识别的数据"，排查时不知道是网关 502、限流页还是空响应
+    const rawText = await response.text().catch(() => "");
     let payload: T & { code?: number; message?: string; request_id?: string };
     try {
-      payload = (await response.json()) as T & { code?: number; message?: string; request_id?: string };
+      payload = JSON.parse(rawText) as T & { code?: number; message?: string; request_id?: string };
     } catch {
-      throw new Error("TikTok Shop API 返回了无法识别的数据。");
+      const brief = rawText.trim().slice(0, 120).replace(/\s+/g, " ");
+      throw new Error(`TikTok Shop API 返回了无法识别的数据（HTTP ${response.status}，${brief || "空响应"}）。`);
     }
     if (!response.ok || (payload.code !== undefined && payload.code !== 0)) {
       const message = payload.message ?? `TikTok Shop API request failed (${response.status})`;

@@ -592,6 +592,9 @@ export interface ChatResponse {
 export type ChatStreamEvent =
   | { type: "step"; step: RunStep }
   | { type: "content_delta"; delta: string }
+  // 清空已推送的流式正文：模型先回了一句「已分析」被判定为空壳、打回重写时，
+  // 前端要把那半句擦掉再重新打字，否则两段会接在一起变成「已分析结论是…」
+  | { type: "content_reset" }
   | { type: "final"; response: ChatResponse }
   | { type: "error"; message: string };
 

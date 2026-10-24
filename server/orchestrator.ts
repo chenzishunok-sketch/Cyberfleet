@@ -17,7 +17,7 @@ import { loadMemory, formatMemoryForPrompt, addPreference, addInsight, recordOpe
 import { memoryLayer } from "./memory-layer.ts";
 import { recordDecisionOutcome } from "./learning-loop.ts";
 import { cleanAssistantText, cleanFollowUps } from "./response-presentation.ts";
-import { getTikTokOperationalData, type TikTokOperationalData } from "./tiktok-data.ts";
+import { getShopDisplayInfo, getTikTokOperationalData, type TikTokOperationalData } from "./tiktok-data.ts";
 import {
   approveTikTokProductWrite,
   ActionVerificationPendingError,
@@ -1164,39 +1164,55 @@ async function renderLiveDecision(decision: AgentDecision, originalText: string)
 
 // ─── 真实模式工具执行器（为 ReAct 循环服务） ──────────────────
 
+/**
+ * 对话工具用的轻量快照：跳过商品详情（图片/类目/SKU 名）。
+ *
+ * 商品详情是逐个商品请求的，106 个商品按并发 8 跑完要半分钟以上，是「回答慢」的最大单项。
+ * 而对话工具的输出只有商品名、库存、销量，图片和类目一个字都用不到。
+ * 前端商品卡片走的是另一条路径（renderLiveDecision / dashboard），那边仍然要完整快照。
+ */
+const TOOL_SNAPSHOT_OPTIONS = { withProductMetadata: false } as const;
+
 function createLiveToolExecutor(request: ChatRequest): ToolExecutorFn {
   return async (decision: AgentDecision): Promise<string> => {
     const rawDays = "days" in decision.args ? (decision.args as { days?: number }).days : undefined;
     const days = rawDays ?? 7;
     switch (decision.tool) {
       case "get_shop_info": {
-        const data = await getTikTokOperationalData(7);
-        return `店铺：${data.shop.name}，站点：${data.shop.region}，币种：${data.currency}，时区：${data.dashboard.store.timezone}`;
+        // 只要店名/站点/币种/时区，不拉经营快照：这四个字段在本地授权和地区配置里就有，
+        // 原来调 getTikTokOperationalData(7) 冷缓存要白等 30 秒
+        const info = await getShopDisplayInfo();
+        return `店铺：${info.name}，站点：${info.region}，币种：${info.currency}，时区：${info.timezone}`;
       }
       case "get_sales_overview": {
         const d = Math.max(1, Math.min(90, Math.floor(days)));
-        const data = await getTikTokOperationalData(d);
-        return `近${d}天：${data.currentOrders}个已支付订单（前${d}天${data.previousOrders}个），${data.totalProducts}个商品，${data.currentReturns}个退货退款申请`;
+        const data = await getTikTokOperationalData(d, TOOL_SNAPSHOT_OPTIONS);
+        // 系统提示里承诺这个工具返回「订单、GMV、退款、客单价」四项，
+        // 但这里以前只返回了订单/商品/退款三个数字，模型据此以为拿到了 GMV，
+        // 实际回答里就只能写"GMV 没取到"。四项要真的都在。
+        const gmv = data.dashboard.metrics.find((metric) => metric.label === "支付 GMV");
+        const average = data.dashboard.metrics.find((metric) => metric.label === "客单价");
+        return `近${d}天：支付GMV ${gmv?.value ?? "--"}，客单价 ${average?.value ?? "--"}，${data.currentOrders}个已支付订单（前${d}天${data.previousOrders}个），${data.totalProducts}个商品，${data.currentReturns}个退货退款申请`;
       }
       case "get_order_summary": {
         const d = Math.max(1, Math.min(90, Math.floor(days)));
-        const data = await getTikTokOperationalData(d);
+        const data = await getTikTokOperationalData(d, TOOL_SNAPSHOT_OPTIONS);
         return `近${d}天已支付订单${data.currentOrders}个，前一周期${data.previousOrders}个${data.currentOrders > data.previousOrders ? "，订单量在增长" : data.currentOrders < data.previousOrders ? "，订单量在下降" : "，订单量持平"}`;
       }
       case "get_gmv_summary": {
-        const data = await getTikTokOperationalData(Math.max(1, Math.min(90, Math.floor(days))));
+        const data = await getTikTokOperationalData(Math.max(1, Math.min(90, Math.floor(days))), TOOL_SNAPSHOT_OPTIONS);
         const gmv = data.dashboard.metrics.find((m) => m.label === "支付 GMV");
         const avg = data.dashboard.metrics.find((m) => m.label === "客单价");
         return `支付GMV：${gmv?.value ?? "--"}，客单价：${avg?.value ?? "--"}`;
       }
       case "get_refund_summary": {
         const d = Math.max(1, Math.min(90, Math.floor(days)));
-        const data = await getTikTokOperationalData(d);
+        const data = await getTikTokOperationalData(d, TOOL_SNAPSHOT_OPTIONS);
         return `近${d}天${data.currentReturns}个退货退款申请（前${d}天${data.previousReturns}个），退款金额${data.currentRefundAmount}`;
       }
       case "list_products": {
         const d = Math.max(1, Math.min(90, Math.floor(days)));
-        const data = await getTikTokOperationalData(d);
+        const data = await getTikTokOperationalData(d, TOOL_SNAPSHOT_OPTIONS);
         const focus = resolveProductFocus("", decision.args.focus);
         let products = [...data.allProducts];
         if (focus === "top") products = products.filter((p) => p.units > 0).sort((a, b) => b.units - a.units).slice(0, 10);
@@ -1211,7 +1227,7 @@ function createLiveToolExecutor(request: ChatRequest): ToolExecutorFn {
       }
       case "generate_operations_report": {
         const d = Math.max(1, Math.min(90, Math.floor(days)));
-        const data = await getTikTokOperationalData(d);
+        const data = await getTikTokOperationalData(d, TOOL_SNAPSHOT_OPTIONS);
         return `近${d}天：${data.currentOrders}个订单，${data.totalProducts}个商品，${data.currentReturns}个退货退款`;
       }
       case "prepare_inventory_update":
@@ -1700,6 +1716,8 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
         emit?.({ type: "step", step: { id: "react-active", label: toolLabel(decision.tool), detail: "正在读取真实数据…", status: "running" } });
         try {
           const result = await rawToolExecutor(decision);
+          // 耗时打点：区分「模型慢」和「接口慢」，这是判断回答为什么卡的第一手数据
+          console.info(`[perf] tool ${decision.tool} ${Date.now() - startTime}ms`);
           recordDecisionOutcome(agent, decision.tool, argsSummary, intent, {
             success: true,
             summary: result.slice(0, 200),
@@ -1721,6 +1739,8 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
           }
         : undefined, emit
         ? (delta) => emit({ type: "content_delta", delta })
+        : undefined, emit
+        ? () => emit({ type: "content_reset" })
         : undefined);
 
       // 如果 LLM 最终选择了 respond（综合回答），优先使用 LLM 的回答内容

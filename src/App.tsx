@@ -258,6 +258,7 @@ export default function App() {
       }, (event) => {
         if (event.type === "step") chatStreaming.addStep(event.step);
         else if (event.type === "content_delta") chatStreaming.appendContent(event.delta);
+        else if (event.type === "content_reset") chatStreaming.resetContent();
       }, controller.signal);
       setConversationState((current) => current
         ? updateConversationMessages(current, targetConversationId, (currentMessages) => [...currentMessages, response.message])

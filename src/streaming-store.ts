@@ -74,6 +74,13 @@ export const chatStreaming = {
     emit();
   },
 
+  /** 丢弃已推送的正文：模型先回了一句空壳、被打回重写时用，避免两段文字接在一起 */
+  resetContent(): void {
+    if (!active || !active.content) return;
+    active = { ...active, content: "" };
+    emit();
+  },
+
   /** 用户主动停止：中断请求，已生成内容仍可在 end() 时取回 */
   stop(): void {
     activeController?.abort();

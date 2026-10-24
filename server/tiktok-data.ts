@@ -279,7 +279,11 @@ const MAX_PAGINATION_PAGES = 1_000;
 // 商品详情（主图/类目/SKU 规格名）短期不会变，但接口是逐个商品查的：
 // 一家 104 个商品的店，一次汇总就要打 104 次，是整体耗时里最大的一块。
 // 缓存后同一批商品在 TTL 内不再重复请求。
-const PRODUCT_METADATA_TTL_MS = Math.max(0, Number(process.env.TIKTOK_PRODUCT_META_TTL_MS ?? "") || 10 * 60 * 1000);
+//
+// TTL 从 10 分钟放宽到 12 小时：这里缓存的只有主图、类目链和规格名，
+// 这些字段一天都不会变；价格、库存、销量走的是别的接口，不受影响。
+// 原来 10 分钟一过就要再打 104 次请求（约半分钟），页面刷新和对话都会卡在这里。
+const PRODUCT_METADATA_TTL_MS = Math.max(0, Number(process.env.TIKTOK_PRODUCT_META_TTL_MS ?? "") || 12 * 60 * 60 * 1000);
 const MAX_PRODUCT_METADATA_ENTRIES = 10_000;
 // 商品详情这类逐项查询的并发上限。TikTok 对单店铺 QPS 有限制，默认 8 是稳妥值。
 const API_CONCURRENCY = Math.max(1, Math.min(20, Number(process.env.TIKTOK_API_CONCURRENCY ?? "") || 8));
@@ -803,7 +807,7 @@ function emptyDashboard(name = "未连接 TikTok Shop", region = "--"): Dashboar
   };
 }
 
-async function fetchOperationalData(days: number): Promise<TikTokOperationalData> {
+async function fetchOperationalData(days: number, withProductMetadata: boolean): Promise<TikTokOperationalData> {
   const client = await getAuthorizedTikTokClient();
   if (!client) throw new Error("TikTok Shop 尚未连接。");
   const authorization = await readStoredAuthorization();
@@ -829,7 +833,11 @@ async function fetchOperationalData(days: number): Promise<TikTokOperationalData
 
   const { products, total } = productResult;
   const [productMetadata, inventory, activityPrices] = await Promise.all([
-    loadProductMetadata(client, products),
+    // 商品详情（图片、类目、SKU 名）一个商品一次请求，106 个商品按并发 8 跑完要半分钟以上。
+    // 对话里的查询工具只输出商品名/库存/销量，这些字段用不上，所以可以由调用方关掉。
+    withProductMetadata
+      ? loadProductMetadata(client, products)
+      : Promise.resolve(new Map<string, ProductMetadata>()),
     searchInventory(client, products.map((product) => product.id)),
     loadActiveActivityPrices(client),
   ]);
@@ -940,14 +948,20 @@ async function fetchOperationalData(days: number): Promise<TikTokOperationalData
 // 平台本身的数据就有 T+1 延迟，几分钟内复用不会让结论失真。
 const SNAPSHOT_TTL_MS = Math.max(30_000, Number(process.env.TIKTOK_SNAPSHOT_TTL_MS ?? "") || 5 * 60 * 1000);
 
-export async function getTikTokOperationalData(days = 7): Promise<TikTokOperationalData> {
+export async function getTikTokOperationalData(
+  days = 7,
+  options: { withProductMetadata?: boolean } = {},
+): Promise<TikTokOperationalData> {
   const authorization = await readStoredAuthorization();
   const shop = selectedShop(authorization);
   const safeDays = Math.max(1, Math.min(90, Math.floor(days)));
-  const key = `${shop.id}:${safeDays}`;
+  // 带不带商品详情必须进缓存键：否则关掉详情的轻量快照会把带图的版本顶掉，
+  // 前端商品卡片会突然集体没图。
+  const withProductMetadata = options.withProductMetadata !== false;
+  const key = `${shop.id}:${safeDays}:${withProductMetadata ? "meta" : "plain"}`;
   const existing = cache.get(key);
   if (existing && existing.expiresAt > Date.now()) return existing.promise;
-  const promise = fetchOperationalData(safeDays).catch((error) => {
+  const promise = fetchOperationalData(safeDays, withProductMetadata).catch((error) => {
     cache.delete(key);
     throw error;
   });
@@ -959,6 +973,20 @@ export async function getCurrentDashboard(): Promise<DashboardSnapshot> {
   const status = await getTikTokConnectionStatus();
   if (!status.connected) return emptyDashboard(status.shopName, status.region);
   return (await getTikTokOperationalData(7)).dashboard;
+}
+
+/**
+ * 店铺展示信息：店名、站点、币种、时区。
+ *
+ * 这四项全部来自本地授权记录和地区配置，一次网络请求都不需要。
+ * 单独抽出来的原因：get_shop_info 工具只要这四个字段，原来却调用 getTikTokOperationalData()
+ * 触发一整套经营快照拉取——冷缓存要等 30 秒，用户问一句"这家店是哪个站点"也要卡半分钟。
+ */
+export async function getShopDisplayInfo(): Promise<{ name: string; region: string; currency: string; timezone: string }> {
+  const authorization = await readStoredAuthorization();
+  const shop = selectedShop(authorization);
+  const metadata = regionMetadata[shop.region] ?? { label: shop.region, currency: "JPY", timezone: "Asia/Tokyo" };
+  return { name: shop.name, region: metadata.label, currency: metadata.currency, timezone: metadata.timezone };
 }
 
 export function clearTikTokDataCache(): void {
