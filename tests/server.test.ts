@@ -5,19 +5,12 @@ import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../server/app.ts";
-import { dashboard } from "../server/data.ts";
 import { getAuthorizedTikTokClient } from "../server/tiktok-auth.ts";
 import { TikTokShopClient } from "../server/tiktok-client.ts";
 import { clearTikTokDataCache } from "../server/tiktok-data.ts";
 import { inferTikTokSceneQuery } from "../server/tiktok-scenes.ts";
 import { inferMiaoshouSceneQuery } from "../server/miaoshou-scenes.ts";
 import { cleanAssistantText } from "../server/response-presentation.ts";
-
-const baselineDashboard = structuredClone(dashboard);
-
-function restoreDashboard() {
-  Object.assign(dashboard, structuredClone(baselineDashboard));
-}
 
 describe("ShopPilot API", () => {
   const app = createApp();
@@ -28,7 +21,6 @@ describe("ShopPilot API", () => {
   });
 
   beforeEach(() => {
-    vi.stubEnv("DEMO_MODE", "true");
     vi.stubEnv("FRONTEND_URL", "http://localhost:5173");
     vi.stubEnv("LLM_API_KEY", "");
     vi.stubEnv("LLM_MODEL", "");
@@ -49,7 +41,6 @@ describe("ShopPilot API", () => {
   });
 
   afterEach(async () => {
-    restoreDashboard();
     clearTikTokDataCache();
     vi.restoreAllMocks();
     await rm(path.join(authTestDirectory, "authorization.json"), { force: true });
@@ -61,60 +52,6 @@ describe("ShopPilot API", () => {
   afterAll(async () => {
     vi.unstubAllEnvs();
     await rm(authTestDirectory, { recursive: true, force: true });
-  });
-
-  it("serves health and the dashboard snapshot", async () => {
-    const root = await request(app).get("/").expect(302);
-    expect(root.headers.location).toBe("http://localhost:5173");
-
-    const health = await request(app).get("/api/health").expect(200);
-    expect(health.body).toEqual({
-      ok: true,
-      mode: "demo",
-      connections: { llm: false, tiktok: false, miaoshou: false, tmapi: false, feishu: false, kolBridge: false },
-      auth: { enabled: false },
-      tiktok: { status: "not_configured", connected: false },
-      llm: { connected: false, source: "missing" },
-      miaoshou: { connected: false },
-      tmapi: { connected: false },
-      feishu: { configured: false, connected: false, longConnection: false, bridgeState: "disabled" },
-    });
-
-    const response = await request(app).get("/api/dashboard").expect(200);
-    expect(response.body).toMatchObject({
-      store: { id: "luma-us", name: "Luma Living US", connected: true },
-      dataAsOf: baselineDashboard.dataAsOf,
-    });
-    expect(response.body.metrics).toHaveLength(4);
-    expect(response.body.products).toEqual(baselineDashboard.products);
-  });
-
-  it("answers a read-only sales query without changing dashboard state", async () => {
-    const before = await request(app).get("/api/dashboard").expect(200);
-
-    const response = await request(app)
-      .post("/api/chat")
-      .send({
-        message: "分析最近 7 天销售表现",
-        storeId: "luma-us",
-        mode: "analysis",
-      })
-      .expect(200);
-
-    expect(response.body.runId).toEqual(expect.any(String));
-    expect(response.body.message).toMatchObject({
-      role: "assistant",
-      artifact: {
-        kind: "analysis",
-        metrics: baselineDashboard.metrics,
-        series: baselineDashboard.salesSeries,
-      },
-    });
-    expect(response.body.message.steps).toHaveLength(3);
-    expect(response.body.message.steps.every((step: { status: string }) => step.status === "done")).toBe(true);
-
-    const after = await request(app).get("/api/dashboard").expect(200);
-    expect(after.body).toEqual(before.body);
   });
 
   it("publishes the complete active-scope capability catalog without credentials", async () => {
@@ -193,68 +130,7 @@ describe("ShopPilot API", () => {
     expect(content).not.toMatch(/\*\*|^[-*]\s/m);
   });
 
-  it("returns an approval card for inventory writes without requiring a mode switch", async () => {
-    const sku = "LL-A104";
-    const originalStock = baselineDashboard.products.find((product: { sku: string; stock: number }) => product.sku === sku)!.stock;
-
-    const prepared = await request(app)
-      .post("/api/chat")
-      .send({
-        message: `将 ${sku} 库存修改为 77`,
-        storeId: "luma-us",
-        mode: "analysis",
-      })
-      .expect(200);
-
-    const plan = prepared.body.message.artifact?.plan;
-    expect(prepared.body.message.artifact?.kind).toBe("approval");
-    expect(plan).toMatchObject({
-      tool: "inventory.update",
-      status: "pending",
-      diffs: [{ target: sku, field: "可售库存", before: String(originalStock), after: "77" }],
-    });
-
-    const pendingDashboard = await request(app).get("/api/dashboard").expect(200);
-    expect(pendingDashboard.body.products.find((product: { sku: string; stock: number }) => product.sku === sku)!.stock).toBe(originalStock);
-
-    const approved = await request(app).post(`/api/actions/${plan.id}/approve`).expect(200);
-    expect(approved.body.message.artifact).toMatchObject({
-      kind: "receipt",
-      actionId: plan.id,
-      diffs: plan.diffs,
-    });
-    expect(approved.body.message.artifact.requestId).toMatch(/^req_[a-f0-9]{16}$/);
-    expect(approved.body.dashboard.products.find((product: { sku: string; stock: number }) => product.sku === sku)!.stock).toBe(77);
-
-    const replay = await request(app).post(`/api/actions/${plan.id}/approve`).expect(409);
-    expect(replay.body.error).toContain("不能重复提交");
-
-    const finalDashboard = await request(app).get("/api/dashboard").expect(200);
-    expect(finalDashboard.body.products.find((product: { sku: string; stock: number }) => product.sku === sku)!.stock).toBe(77);
-    expect(finalDashboard.body.activity[0].meta).toContain(approved.body.message.artifact.requestId);
-  });
-
-  it("understands restoring inventory as a protected write", async () => {
-    const sku = "LL-A104";
-    const originalStock = baselineDashboard.products.find((product: { sku: string; stock: number }) => product.sku === sku)!.stock;
-    const response = await request(app)
-      .post("/api/chat")
-      .send({ message: `将 ${sku} 库存恢复为 ${originalStock + 1}`, storeId: "luma-us", mode: "analysis" })
-      .expect(200);
-
-    expect(response.body.message.artifact).toMatchObject({
-      kind: "approval",
-      plan: {
-        tool: "inventory.update",
-        status: "pending",
-        diffs: [{ target: sku, before: String(originalStock), after: String(originalStock + 1) }],
-      },
-    });
-    expect(dashboard.products.find((product: { sku: string; stock: number }) => product.sku === sku)!.stock).toBe(originalStock);
-  });
-
   it("uses live TikTok data for dashboard and returns different answers by intent", async () => {
-    vi.stubEnv("DEMO_MODE", "false");
     vi.stubEnv("TIKTOK_SHOP_APP_KEY", "test-app-key");
     vi.stubEnv("TIKTOK_SHOP_APP_SECRET", "test-app-secret");
     const now = Math.floor(Date.now() / 1000);
@@ -525,112 +401,5 @@ describe("ShopPilot API", () => {
     expect(tiktok.config.appKey).toBe("skill-app-key");
     expect(tiktok.config.appSecret).toMatch(/^sk\*+et$/);
     expect(JSON.stringify(catalog.body)).not.toContain("skill-app-secret");
-  });
-
-  it("lists and removes store bindings without touching other grants", async () => {
-    vi.stubEnv("TIKTOK_SHOP_APP_KEY", "test-app-key");
-    vi.stubEnv("TIKTOK_SHOP_APP_SECRET", "test-app-secret");
-    const now = Math.floor(Date.now() / 1000);
-    const shop = (id: string, name: string, region: string, cipher: string) => ({ id, name, region, cipher });
-    const grant = (grantId: string, accessToken: string, sellerName: string, shops: Array<{ id: string; name: string; region: string; cipher: string }>) => ({
-      grantId,
-      accessToken,
-      accessTokenExpiresAt: now + 604800,
-      refreshToken: `refresh-${grantId}`,
-      refreshTokenExpiresAt: now + 31536000,
-      sellerName,
-      sellerRegion: "CN",
-      grantedScopes: ["seller.authorization.info"],
-      shops,
-      authorizedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-    await writeFile(path.join(authTestDirectory, "authorization.json"), JSON.stringify({
-      version: 2,
-      selected: { grantId: "grant-jp", shopId: "shop-jp" },
-      grants: [
-        grant("grant-jp", "token-jp", "Mikolo JP", [shop("shop-jp", "Mikolo", "JP", "cipher-jp")]),
-        grant("grant-us", "token-us", "Mikolo US", [shop("shop-us", "Mikolo Store", "US", "cipher-us")]),
-      ],
-    }));
-
-    const bindings = await request(app).get("/api/tiktok/bindings").expect(200);
-    expect(bindings.body.bindings).toHaveLength(2);
-    expect(bindings.body.bindings.map((binding: { grantId: string }) => binding.grantId)).toEqual(["grant-jp", "grant-us"]);
-    expect(bindings.body.tiktok).toMatchObject({ status: "connected", shopName: "Mikolo", region: "JP" });
-
-    const removed = await request(app).delete("/api/tiktok/bindings/grant-jp").expect(200);
-    expect(removed.body.ok).toBe(true);
-    // 解绑的是当前店铺所在 grant：选中被清空，状态回落到待选择，剩余绑定保留
-    expect(removed.body.tiktok.status).toBe("shop_selection_required");
-    expect(removed.body.tiktok.bindings).toHaveLength(1);
-    expect(removed.body.tiktok.bindings[0].grantId).toBe("grant-us");
-
-    const replay = await request(app).delete("/api/tiktok/bindings/grant-jp").expect(400);
-    expect(replay.body.error).toContain("没有找到");
-  });
-
-  it("requires an explicit selection when OAuth returns multiple shops", async () => {
-    vi.stubEnv("TIKTOK_SHOP_APP_KEY", "test-app-key");
-    vi.stubEnv("TIKTOK_SHOP_APP_SECRET", "test-app-secret");
-    const now = Math.floor(Date.now() / 1000);
-    const authorization = await request(app).get("/api/tiktok/authorize").expect(302);
-    const state = new URL(authorization.headers.location).searchParams.get("state");
-    const oauthCookie = authorization.headers["set-cookie"][0].split(";")[0];
-
-    vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        code: 0,
-        message: "Success",
-        data: {
-          access_token: "multi-access-token",
-          access_token_expire_in: now + 604800,
-          refresh_token: "multi-refresh-token",
-          refresh_token_expire_in: now + 31536000,
-          user_type: 0,
-          granted_scopes: ["seller.authorization.info"],
-        },
-      }), { status: 200, headers: { "content-type": "application/json" } }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        code: 0,
-        message: "Success",
-        data: { shops: [
-          { id: "shop-1", name: "US Shop", region: "US", cipher: "cipher-us" },
-          { id: "shop-2", name: "UK Shop", region: "GB", cipher: "cipher-gb" },
-        ] },
-      }), { status: 200, headers: { "content-type": "application/json" } }));
-
-    await request(app)
-      .get(`/api/tiktok/callback?code=multi-auth-code&state=${state}`)
-      .set("Cookie", oauthCookie)
-      .expect(200);
-
-    const pending = await request(app).get("/api/health").expect(200);
-    expect(pending.body.tiktok).toEqual({
-      status: "shop_selection_required",
-      connected: false,
-      expiresAt: now + 604800,
-      shops: [
-        { id: "shop-1", name: "US Shop", region: "US" },
-        { id: "shop-2", name: "UK Shop", region: "GB" },
-      ],
-      bindings: [
-        {
-          grantId: expect.any(String),
-          status: "connected",
-          expiresAt: now + 604800,
-          shops: [
-            { id: "shop-1", name: "US Shop", region: "US" },
-            { id: "shop-2", name: "UK Shop", region: "GB" },
-          ],
-          authorizedAt: expect.any(String),
-        },
-      ],
-    });
-
-    const selected = await request(app).post("/api/tiktok/shop").send({ shopId: "shop-2" }).expect(200);
-    expect(selected.body.tiktok).toMatchObject({ status: "connected", connected: true, shopName: "UK Shop", region: "GB" });
-    const stored = JSON.parse(await readFile(path.join(authTestDirectory, "authorization.json"), "utf8"));
-    expect(stored.selected).toEqual({ grantId: stored.grants[0].grantId, shopId: "shop-2" });
   });
 });

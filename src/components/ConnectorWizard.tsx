@@ -17,7 +17,6 @@ export type ConnectorWizardStep = "about" | "credentials" | "result";
 interface ConnectorWizardProps {
   skill: SkillDefinition;
   status: SkillStatus;
-  demoMode: boolean;
   onClose: () => void;
   /** 保存/测试后通知 App 刷新目录与健康状态 */
   onSaved: () => Promise<void> | void;
@@ -74,7 +73,7 @@ export function connectorHelp(skillId: string): ConnectorHelp | undefined {
   return CONNECTOR_HELP[skillId];
 }
 
-export function ConnectorWizard({ skill, status, demoMode, onClose, onSaved }: ConnectorWizardProps) {
+export function ConnectorWizard({ skill, status, onClose, onSaved }: ConnectorWizardProps) {
   const [step, setStep] = useState<ConnectorWizardStep>("about");
   const [values, setValues] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
@@ -138,13 +137,6 @@ export function ConnectorWizard({ skill, status, demoMode, onClose, onSaved }: C
           </div>
           <button className="icon-button" aria-label="关闭向导" title="关闭向导" onClick={onClose}><X size={20} /></button>
         </div>
-
-        {demoMode && (
-          <div className="wizard-banner wizard-banner--info">
-            <Info size={15} />
-            <span>当前处于演示模式。绑定的接口凭证会正常保存，退出演示模式后才会参与真实业务。</span>
-          </div>
-        )}
 
         <div className="wizard-steps" aria-label="绑定进度">
           {STEP_ORDER.map((item, index) => (

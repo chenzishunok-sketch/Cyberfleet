@@ -12,18 +12,16 @@ import {
   X,
 } from "lucide-react";
 import type { SkillsCatalogResponse, TikTokConnectionStatus } from "../../shared/contracts";
-import { api } from "../api";
+import { api, API_BASE } from "../api";
 import { regionLabel } from "../region-labels";
 
-export type ConnectionWizardStep = "guide" | "credentials" | "authorize" | "shop";
+export type ConnectionWizardStep = "guide" | "credentials" | "authorize";
 
 interface ConnectionWizardProps {
   onClose: () => void;
   tiktokConnection: TikTokConnectionStatus;
-  demoMode: boolean;
-  /** 保存凭证 / 选择店铺后通知 App 刷新连接状态 */
+  /** 保存凭证 / 授权完成后通知 App 刷新连接状态 */
   onRefresh: () => Promise<void> | void;
-  onSelectTikTokShop: (shopId: string, grantId?: string) => Promise<void>;
   initialStep?: ConnectionWizardStep;
 }
 
@@ -31,15 +29,14 @@ const STEP_ORDER: Array<{ id: ConnectionWizardStep; label: string }> = [
   { id: "guide", label: "准备凭证" },
   { id: "credentials", label: "应用密钥" },
   { id: "authorize", label: "前往授权" },
-  { id: "shop", label: "选择店铺" },
 ];
 
-/** 需要复制到 TikTok Partner Center 的授权回调地址 */
+/** 需要复制到 TikTok Partner Center 的授权回调地址（子路径部署时自动带上 /cyberfleet 前缀） */
 function callbackUrl(): string {
-  return `${window.location.protocol}//${window.location.hostname}:8795/api/tiktok/callback`;
+  return `${window.location.origin}${API_BASE}/api/tiktok/callback`;
 }
 
-export function ConnectionWizard({ onClose, tiktokConnection, demoMode, onRefresh, onSelectTikTokShop, initialStep = "guide" }: ConnectionWizardProps) {
+export function ConnectionWizard({ onClose, tiktokConnection, onRefresh, initialStep = "guide" }: ConnectionWizardProps) {
   const [step, setStep] = useState<ConnectionWizardStep>(initialStep);
   const [catalog, setCatalog] = useState<SkillsCatalogResponse>();
   const [appKey, setAppKey] = useState("");
@@ -48,7 +45,6 @@ export function ConnectionWizard({ onClose, tiktokConnection, demoMode, onRefres
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [copied, setCopied] = useState(false);
-  const [selectingShopId, setSelectingShopId] = useState<string>();
 
   useEffect(() => {
     let cancelled = false;
@@ -104,21 +100,7 @@ export function ConnectionWizard({ onClose, tiktokConnection, demoMode, onRefres
     }
   };
 
-  const confirmShop = async () => {
-    if (!selectingShopId) return;
-    setSaving(true);
-    setError(undefined);
-    try {
-      await onSelectTikTokShop(selectingShopId);
-      onClose();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "选择店铺失败。");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const visibleSteps = STEP_ORDER.filter((item) => item.id !== "shop" || step === "shop");
+  const visibleSteps = STEP_ORDER;
   const stepIndex = visibleSteps.findIndex((item) => item.id === step);
 
   return (
@@ -131,13 +113,6 @@ export function ConnectionWizard({ onClose, tiktokConnection, demoMode, onRefres
           </div>
           <button className="icon-button" aria-label="关闭绑定向导" title="关闭绑定向导" onClick={onClose}><X size={20} /></button>
         </div>
-
-        {demoMode && (
-          <div className="wizard-banner wizard-banner--info">
-            <Info size={15} />
-            <span>当前处于演示模式。绑定操作会正常保存，退出演示模式后才会使用真实店铺数据。</span>
-          </div>
-        )}
 
         <div className="wizard-steps" aria-label="绑定进度">
           {visibleSteps.map((item, index) => (
@@ -241,42 +216,13 @@ export function ConnectionWizard({ onClose, tiktokConnection, demoMode, onRefres
               <p className="wizard-note">如果授权页提示「你店铺所在地区不可用 / 请切换 Self-operated (POP) 账号」，说明当前登录的卖家账号和 App Service ID 不匹配：回到上一步核对 Service ID，或用对应地区的卖家账号登录后再授权。</p>
               <div className="wizard-actions">
                 <button className="skill-config-cancel" onClick={() => setStep("credentials")}>上一步</button>
-                <button className="primary-button" onClick={() => window.location.assign("/api/tiktok/authorize")}>
+                <button className="primary-button" onClick={() => window.location.assign(API_BASE + "/api/tiktok/authorize")}>
                   去授权<ArrowRight size={15} />
                 </button>
               </div>
             </div>
           )}
 
-          {step === "shop" && (
-            <div className="wizard-section">
-              <h3><Store size={17} />选择要操作的店铺</h3>
-              <p className="wizard-note">这次授权返回了多个店铺，选择一个作为当前操作店铺（之后可在设置页随时切换）。</p>
-              <div className="wizard-shop-list" role="radiogroup" aria-label="选择店铺">
-                {(tiktokConnection.shops ?? []).map((shop) => (
-                  <label key={shop.id} className={`wizard-shop-option ${selectingShopId === shop.id ? "wizard-shop-option--active" : ""}`}>
-                    <input
-                      type="radio"
-                      name="wizard-shop"
-                      value={shop.id}
-                      checked={selectingShopId === shop.id}
-                      onChange={() => setSelectingShopId(shop.id)}
-                    />
-                    <CheckCircle2 size={15} className="wizard-shop-radio" />
-                    <span>{shop.name}</span>
-                    <small>{regionLabel(shop.region)}</small>
-                  </label>
-                ))}
-              </div>
-              <div className="wizard-actions">
-                <button className="skill-config-cancel" onClick={onClose}>稍后再选</button>
-                <button className="skill-config-save" disabled={!selectingShopId || saving} onClick={() => void confirmShop()}>
-                  {saving ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
-                  <span>{saving ? "正在切换" : "确认店铺"}</span>
-                </button>
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>

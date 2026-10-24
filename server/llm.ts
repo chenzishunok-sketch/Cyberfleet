@@ -616,7 +616,7 @@ export async function summarizeLiveShopData(input: {
 
 export function hasLlmConfiguration(): boolean {
   const config = getLlmRuntimeConfig();
-  return Boolean(config.apiKey && config.model && process.env.DEMO_MODE !== "true");
+  return Boolean(config.apiKey && config.model);
 }
 
 function agentRolePrompt(request: ChatRequest): string {

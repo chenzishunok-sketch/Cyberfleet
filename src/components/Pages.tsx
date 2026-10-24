@@ -33,7 +33,7 @@ import type {
   SkillConnectionTestResult,
 } from "../../shared/contracts";
 import { WorkflowCenter } from "./WorkflowCenter";
-import { api } from "../api";
+import { api, API_BASE } from "../api";
 import type { TikTokConnectionStatus } from "../api";
 import { regionLabel } from "../region-labels";
 import type { ViewId } from "./Sidebar";
@@ -44,9 +44,6 @@ interface PageProps {
   tiktokConnection: TikTokConnectionStatus;
   onToggleAutomation: (id: string) => void;
   onOpenChat: (prompt?: string) => void;
-  onSelectTikTokShop: (shopId: string, grantId?: string) => Promise<void>;
-  onBindNewShop: () => void;
-  onUnbindBinding: (grantId: string) => Promise<void>;
   llmOverview?: LlmProvidersOverview;
   onLlmChanged: () => Promise<void>;
   onAddLlmProvider: () => void;
@@ -111,9 +108,7 @@ function AutomationsPage({ dashboard, onToggleAutomation, onOpenChat }: PageProp
 function ReportsPage({ dashboard, onOpenChat }: PageProps) {
   const description = dashboard.dataSource === "tiktok"
     ? "报告只使用当前 TikTok Shop 真实数据，生成后可从对话中下载。"
-    : dashboard.dataSource === "demo"
-      ? "当前为演示模式，生成的报告不会代表真实店铺经营情况。"
-      : "连接 TikTok Shop 后即可生成真实经营报告。";
+    : "连接 TikTok Shop 后即可生成真实经营报告。";
   return (
     <div className="page-content">
       <PageHeader eyebrow="REPORTS" title="经营报告" description={description} action={<button className="primary-button" onClick={() => onOpenChat("生成一份近 7 天经营报告")}><Plus size={16} />生成报告</button>} />
@@ -156,110 +151,40 @@ function bindingExpiryText(expiresAt: number | undefined): string {
   return `令牌剩余约 ${days} 天有效期`;
 }
 
-function TikTokBindingCard({
-  binding,
-  selectingShopId,
-  onSelectShop,
-  onReauthorize,
-  onUnbind,
-}: {
-  binding: TikTokBindingSummary;
-  selectingShopId?: string;
-  onSelectShop: (shopId: string, grantId?: string) => Promise<void>;
-  onReauthorize: () => void;
-  onUnbind: () => void;
-}) {
-  const [confirmingUnbind, setConfirmingUnbind] = useState(false);
-  const isCurrent = binding.selectedShopId !== undefined;
-  return (
-    <div className="binding-card">
-      <div className="binding-card-header">
-        <span className="connection-logo connection-logo--shop"><Store size={19} /></span>
-        <div className="binding-card-title">
-          <strong>{binding.sellerName || "TikTok 卖家账号"}{isCurrent && <span className="binding-current-badge">当前</span>}</strong>
-          <span>{binding.sellerRegion ? regionLabel(binding.sellerRegion) : "多区域卖家"} · {binding.shops.length} 个店铺{binding.expiresAt ? ` · ${bindingExpiryText(binding.expiresAt)}` : ""}</span>
-        </div>
-        <span className={`binding-status binding-status--${binding.status}`}><i />{BINDING_STATUS_LABELS[binding.status]}</span>
-      </div>
-      {binding.status === "invalid" && <p className="binding-warning"><AlertTriangle size={13} />该账号的授权令牌已完全过期，请重新授权后再使用。</p>}
-      <div className="binding-shop-list">
-        {binding.shops.map((shop) => (
-          <div key={shop.id} className="binding-shop-row">
-            <Store size={14} />
-            <div className="binding-shop-name"><strong>{shop.name}</strong><small>{regionLabel(shop.region)}</small></div>
-            {binding.selectedShopId === shop.id ? (
-              <span className="binding-current-chip"><Check size={12} />当前店铺</span>
-            ) : (
-              <button className="secondary-button connection-button" disabled={selectingShopId === shop.id} onClick={() => void onSelectShop(shop.id, binding.grantId)}>
-                {selectingShopId === shop.id ? <LoaderCircle size={14} className="spin" /> : null}
-                {selectingShopId === shop.id ? "切换中" : "设为当前"}
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
-      <div className="binding-card-actions">
-        <button className="secondary-button connection-button" onClick={onReauthorize}><RefreshCcw size={14} />重新授权</button>
-        {confirmingUnbind ? (
-          <div className="binding-unbind-confirm">
-            <span><AlertTriangle size={13} />解绑后本地授权立即删除，平台侧授权可在 TikTok 卖家中心撤回。</span>
-            <button className="secondary-button connection-button binding-unbind-button" onClick={() => { setConfirmingUnbind(false); onUnbind(); }}>确认解绑</button>
-            <button className="secondary-button connection-button" onClick={() => setConfirmingUnbind(false)}>取消</button>
-          </div>
-        ) : (
-          <button className="secondary-button connection-button binding-unbind-button" onClick={() => setConfirmingUnbind(true)}>解绑</button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function TikTokBindingsSection({
-  dashboard,
+function TikTokShopSection({
   tiktokConnection,
-  selectingShopId,
-  onSelectTikTokShop,
-  onBindNewShop,
-  onUnbindBinding,
+  onReauthorize,
 }: {
-  dashboard: DashboardSnapshot;
   tiktokConnection: TikTokConnectionStatus;
-  selectingShopId?: string;
-  onSelectTikTokShop: (shopId: string, grantId?: string) => Promise<void>;
-  onBindNewShop: () => void;
-  onUnbindBinding: (grantId: string) => Promise<void>;
+  onReauthorize: () => void;
 }) {
-  const bindings = tiktokConnection.bindings ?? [];
-  const demo = dashboard.dataSource === "demo";
+  const shop = tiktokConnection.bindings?.[0]?.shops?.[0];
   return (
     <section className="settings-section">
       <div className="settings-heading">
-        <h2>TikTok Shop 店铺绑定</h2>
-        <p>支持绑定多个卖家账号与多国店铺，所有店铺统一管理，随时切换当前操作店铺。</p>
+        <h2>TikTok Shop 店铺</h2>
+        <p>本项目只经营一个授权店铺，页面与对话都使用它。</p>
       </div>
       <div className="binding-list">
-        {bindings.map((binding) => (
-          <TikTokBindingCard
-            key={binding.grantId}
-            binding={binding}
-            selectingShopId={selectingShopId}
-            onSelectShop={onSelectTikTokShop}
-            onReauthorize={() => window.location.assign("/api/tiktok/authorize")}
-            onUnbind={() => void onUnbindBinding(binding.grantId)}
-          />
-        ))}
-        {bindings.length === 0 && (
+        {shop ? (
+          <div className="binding-shop-row">
+            <Store size={18} />
+            <div className="binding-shop-name">
+              <strong>{shop.name}</strong>
+              <small>{regionLabel(shop.region)}</small>
+            </div>
+            <span className="binding-current-chip"><Check size={12} />当前店铺</span>
+            <button className="secondary-button connection-button" onClick={onReauthorize}><RefreshCcw size={14} />重新授权</button>
+          </div>
+        ) : (
           <div className="binding-empty">
             <Store size={22} />
             <div>
-              <strong>还没有绑定 TikTok Shop 店铺</strong>
-              <span>{demo ? "演示模式下页面使用内置示例数据。" : "按向导准备应用凭证并完成授权，即可在对话中查询和操作店铺。"}</span>
+              <strong>还没有授权 TikTok Shop 店铺</strong>
+              <span>完成授权后，即可在对话中查询和操作店铺。</span>
             </div>
-            <button className="primary-button" onClick={onBindNewShop}><Plus size={15} />绑定新店铺</button>
+            <button className="primary-button" onClick={onReauthorize}><Plus size={15} />连接店铺</button>
           </div>
-        )}
-        {bindings.length > 0 && (
-          <button className="binding-add" onClick={onBindNewShop}><Plus size={15} />绑定新店铺 / 新卖家账号</button>
         )}
       </div>
     </section>
@@ -577,9 +502,6 @@ function BusinessConnectorsSection({
 function SettingsPage({
   dashboard,
   tiktokConnection,
-  onSelectTikTokShop,
-  onBindNewShop,
-  onUnbindBinding,
   llmOverview,
   onLlmChanged,
   onAddLlmProvider,
@@ -589,16 +511,6 @@ function SettingsPage({
   onOpenConnectorWizard,
   onOpenConversationManager,
 }: PageProps) {
-  const [selectingShopId, setSelectingShopId] = useState<string>();
-  const selectShop = async (shopId: string, grantId?: string) => {
-    setSelectingShopId(shopId);
-    try {
-      await onSelectTikTokShop(shopId, grantId);
-    } finally {
-      setSelectingShopId(undefined);
-    }
-  };
-
   return (
     <div className="page-content settings-page">
       <PageHeader eyebrow="SETTINGS" title="连接与权限" description="店铺绑定与大模型连接在这里统一管理，凭证只保存在本机服务端。" />
@@ -613,13 +525,9 @@ function SettingsPage({
           </div>
         </div>
       </section>
-      <TikTokBindingsSection
-        dashboard={dashboard}
+      <TikTokShopSection
         tiktokConnection={tiktokConnection}
-        selectingShopId={selectingShopId}
-        onSelectTikTokShop={selectShop}
-        onBindNewShop={onBindNewShop}
-        onUnbindBinding={onUnbindBinding}
+        onReauthorize={() => window.location.assign(API_BASE + "/api/tiktok/authorize")}
       />
       <LlmProvidersSection
         overview={llmOverview}

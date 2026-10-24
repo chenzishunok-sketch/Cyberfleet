@@ -40,6 +40,25 @@ const PERCENT_PATTERN = /([\d.]+)\s*%/g;
 const TREND_PATTERN = /(同比|环比)?\s*(上升|下降|增长|减少|降低|下滑|上涨|持平)\s*([\d.]+)\s*%/g;
 const SUBJECT_CONTEXT_PATTERN = /([^\s，。,；；\n]{2,20})(?:规模|销量|GMV|销售额|占比|增长率|市场)?/;
 
+/**
+ * 从数字前面的上下文里提取一个「干净的中文指标词」作为卡片标签。
+ * 返回 null 表示上下文不是指标词（是句子片段/外文碎片/标点尾巴），该数字不应做成指标卡。
+ * 之前这里抓「货币/百分号前任意 2-16 个字符」且兜底 `${currency} 规模`，
+ * 结果出现「¥ 规模」「JP」「P¥」「建议今天就能发起一轮小批量建联：从」「天是」这类垃圾标签。
+ */
+function extractMetricLabel(beforeText: string): string | null {
+  // 取紧挨数字前的最后一段连续非空白非标点文本
+  const candidate = beforeText.match(/([^\s，。,；;；：:、（）()【】\[\]{}"'%¥$€£฿\d]{2,12})$/)?.[1] ?? "";
+  if (!candidate) return null;
+  // 必须包含至少 2 个中文字符（纯外文缩写如 JP/P 不算指标词）
+  const cjkCount = (candidate.match(/[\u4e00-\u9fa5]/g) ?? []).length;
+  if (cjkCount < 2) return null;
+  // 去掉结尾挂在句子里蹭进来的虚词（"过去7天是3.4%" 的「天是」→「天」不足 2 字即弃）
+  const trimmed = candidate.replace(/[是为的与和或从到在把将使了]/g, "");
+  if ((trimmed.match(/[\u4e00-\u9fa5]/g) ?? []).length < 2) return null;
+  return trimmed;
+}
+
 export function detectVisualPatterns(text: string): DetectionResult {
   const sections: VisualSection[] = [];
   let confidence = 0;
@@ -153,8 +172,9 @@ export function detectVisualPatterns(text: string): DetectionResult {
     const value = cm[2];
     const unit = cm[3] ?? "";
     const beforeText = text.substring(Math.max(0, cm.index - 100), cm.index);
-    const contextMatch = beforeText.match(/([^\s，。,；;]{2,16})(?=(?:\s*)[฿¥$€£])/);
-    const label = contextMatch ? contextMatch[1] : `${currency} 规模`;
+    const label = extractMetricLabel(beforeText);
+    // 没有干净的中文指标词就不要硬造卡片——「¥ 规模」「JP」这种标签比没有卡更糟
+    if (!label) continue;
 
     let trend: "up" | "down" | "flat" | undefined;
     let delta: string | undefined;
@@ -180,8 +200,9 @@ export function detectVisualPatterns(text: string): DetectionResult {
   while ((pm = percentRegex.exec(text)) !== null && percentItems.length < 4) {
     const pct = pm[1];
     const beforeText = text.substring(Math.max(0, pm.index - 100), pm.index);
-    const contextMatch = beforeText.match(/([^\s，。,；;]{2,20}?)(?=(?:同比|环比|增长|下降|上升|减少|持平)?\s*[\d.]+%?)/);
-    const label = contextMatch ? contextMatch[1] : `指标 ${pct}%`;
+    const label = extractMetricLabel(beforeText);
+    // 抓不到干净指标词（比如「建议…从 20%」「过去 7 天是 3.4%」这类句子尾巴）就跳过该百分比
+    if (!label) continue;
 
     let trend: "up" | "down" | "flat" | undefined;
     let delta: string | undefined;
@@ -197,8 +218,14 @@ export function detectVisualPatterns(text: string): DetectionResult {
     }
   }
 
-  // 合并数据卡片
-  const allDataItems = [...dataCards, ...percentItems];
+  // 合并数据卡片：同名标签只保留第一个，避免同一指标重复出卡
+  const seenLabels = new Set<string>();
+  const allDataItems = [...dataCards, ...percentItems].filter((item) => {
+    const key = item.label.replace(/\s+/g, "");
+    if (seenLabels.has(key)) return false;
+    seenLabels.add(key);
+    return true;
+  });
   if (allDataItems.length > 0) {
     sections.push({
       type: "data_highlights",

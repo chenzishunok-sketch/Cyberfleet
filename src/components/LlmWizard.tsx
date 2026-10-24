@@ -20,7 +20,6 @@ interface LlmWizardProps {
   onClose: () => void;
   /** 编辑换绑时传入已有服务，直接进入凭证步骤并预填 */
   editing?: LlmProviderSummary;
-  demoMode: boolean;
   /** 保存后通知 App 刷新大模型概览与健康状态 */
   onSaved: () => Promise<void> | void;
 }
@@ -44,7 +43,7 @@ const LLM_PRESETS: LlmPreset[] = [
   { id: "custom", name: "自定义服务", baseUrl: "", models: "任意 OpenAI-compatible 服务", keyUrl: "" },
 ];
 
-export function LlmWizard({ onClose, editing, demoMode, onSaved }: LlmWizardProps) {
+export function LlmWizard({ onClose, editing, onSaved }: LlmWizardProps) {
   const [step, setStep] = useState<LlmWizardStep>(editing ? "credentials" : "preset");
   const [presetId, setPresetId] = useState("custom");
   const [name, setName] = useState(editing?.name ?? "");
@@ -155,13 +154,6 @@ export function LlmWizard({ onClose, editing, demoMode, onSaved }: LlmWizardProp
           </div>
           <button className="icon-button" aria-label="关闭向导" title="关闭向导" onClick={onClose}><X size={20} /></button>
         </div>
-
-        {demoMode && (
-          <div className="wizard-banner wizard-banner--info">
-            <Info size={15} />
-            <span>当前处于演示模式。绑定的模型服务会在退出演示模式后用于真实对话。</span>
-          </div>
-        )}
 
         <div className="wizard-steps" aria-label="绑定进度">
           {STEP_ORDER.map((item, index) => (

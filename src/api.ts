@@ -28,9 +28,13 @@ import type { IntelligenceOverview, IntelligenceScope, KnowledgeCategory, Knowle
 
 export type { TikTokBindingSummary, TikTokConnectionStatus, LlmProviderSummary, LlmProvidersOverview, LlmProviderTestResult } from "../shared/contracts";
 
+// 前端部署在子路径（如 /cyberfleet/）下时，BASE_URL = "/cyberfleet/"，
+// API 请求统一加前缀，避免绝对根路径落到站点根。开发时 BASE_URL="/" → 前缀为空。
+export const API_BASE = import.meta.env.BASE_URL.replace(/\/+$/, "");
+
 export interface HealthResponse {
   ok: boolean;
-  mode: "demo" | "connected" | "setup";
+  mode: "connected" | "setup";
   connections: { llm: boolean; tiktok: boolean; miaoshou: boolean; tmapi: boolean; kolBridge: boolean };
   tiktok: TikTokConnectionStatus;
   llm: { connected: boolean; source: "provider" | "env" | "missing"; name?: string; model?: string };
@@ -45,7 +49,7 @@ export interface KolOverviewResponse {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(API_BASE + path, {
     ...init,
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
   });
@@ -68,7 +72,7 @@ export const api = {
   chat: (input: ChatRequest) => request<ChatResponse>("/api/chat", { method: "POST", body: JSON.stringify(input) }),
   // 流式对话：通过 SSE 实时推送步骤进度和最终回答，首字时间从 10-30s 降到 <1s
   chatStream: async (input: ChatRequest, onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal): Promise<ChatResponse> => {
-    const response = await fetch("/api/chat", {
+    const response = await fetch(API_BASE + "/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json", accept: "text/event-stream" },
       body: JSON.stringify(input),
@@ -107,11 +111,6 @@ export const api = {
   reject: (actionId: string) => request<{ plan: { status: string } }>(`/api/actions/${actionId}/reject`, { method: "POST" }),
   toggleAutomation: (automationId: string) =>
     request<{ automation: DashboardSnapshot["automations"][number] }>(`/api/automations/${automationId}/toggle`, { method: "POST" }),
-  selectTikTokShop: (shopId: string, grantId?: string) =>
-    request<{ tiktok: TikTokConnectionStatus }>("/api/tiktok/shop", { method: "POST", body: JSON.stringify(grantId ? { shopId, grantId } : { shopId }) }),
-  tiktokBindings: () => request<{ bindings: TikTokBindingSummary[]; tiktok: TikTokConnectionStatus }>("/api/tiktok/bindings"),
-  unbindTikTokBinding: (grantId: string) =>
-    request<{ ok: boolean; tiktok: TikTokConnectionStatus }>(`/api/tiktok/bindings/${encodeURIComponent(grantId)}`, { method: "DELETE" }),
   health: () => request<HealthResponse>("/api/health"),
   contentOverview: () => request<ContentOverview>("/api/content"),
   intelligenceOverview: () => request<IntelligenceOverview>("/api/intelligence"),

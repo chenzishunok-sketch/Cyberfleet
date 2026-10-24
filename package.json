@@ -12,7 +12,7 @@
     "check:conn": "node scripts/check-connections.mjs",
     "build": "tsc -b && vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
-    "start:cloud": "npm run build && DEMO_MODE=true NODE_ENV=production HOST=0.0.0.0 tsx server/index.ts",
+    "start:cloud": "npm run build && NODE_ENV=production HOST=0.0.0.0 tsx server/index.ts",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false",
     "feishu": "lark-cli",

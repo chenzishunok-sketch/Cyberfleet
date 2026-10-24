@@ -63,16 +63,12 @@ const ConnectorWizard = lazy(() =>
 function initialMessage(snapshot: DashboardSnapshot): ChatMessage {
   const content = snapshot.dataSource === "tiktok"
     ? "今天想先处理什么？"
-    : snapshot.dataSource === "demo"
-      ? "当前处于演示模式，页面数据不是实际店铺数据。"
-      : "TikTok Shop 尚未连接，请先前往设置完成授权。";
+    : "TikTok Shop 尚未连接，请先前往设置完成授权。";
   const followUps = snapshot.dataSource === "tiktok"
     ? snapshot.alerts.some((alert) => /(没有.*订单|订单.*没有|0.*订单)/.test(alert.text))
       ? ["最近什么商品好卖", "查看当前促销活动", "查看全部商品库存"]
       : ["分析最近 7 天店铺销售表现", "查找库存不足的 SKU", "生成近 7 天经营报告"]
-    : snapshot.dataSource === "demo"
-      ? ["分析最近 7 天销售表现", "查看全部商品库存"]
-      : [];
+    : [];
   return {
     id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `welcome-${Date.now()}`,
     role: "assistant",
@@ -173,15 +169,8 @@ export default function App() {
       const result = params.get("result");
       window.history.replaceState({}, "", window.location.pathname);
       if (result === "success") {
-        setToast({ tone: "success", text: "TikTok Shop 授权成功，新店铺已加入绑定列表。" });
+        setToast({ tone: "success", text: "TikTok Shop 授权成功，店铺已连接。" });
         void loadWorkspace();
-        // 授权返回了多个店铺且尚未选择时，自动打开向导的选择店铺步骤
-        void api.health().then((health) => {
-          if (health.tiktok.status === "shop_selection_required") {
-            setConnectionWizardStep("shop");
-            setConnectionWizardOpen(true);
-          }
-        }).catch(() => undefined);
       } else if (result === "error") {
         setToast({ tone: "error", text: "TikTok Shop 授权未完成，请在设置页重新发起授权。" });
       }
@@ -375,39 +364,6 @@ export default function App() {
     }
   }, []);
 
-  const selectTikTokShop = async (shopId: string, grantId?: string) => {
-    try {
-      const result = await api.selectTikTokShop(shopId, grantId);
-      setTikTokConnection(result.tiktok);
-      setConnections((current) => ({ ...current, tiktok: result.tiktok.connected }));
-      const refreshed = await loadWorkspace();
-      if (refreshed) {
-        setToast({ tone: "success", text: `已切换到 ${result.tiktok.shopName ?? "TikTok Shop 店铺"}，数据已刷新。` });
-      } else {
-        setToast({ tone: "error", text: "店铺已选择，但新店铺数据加载失败，请点击重试。" });
-      }
-    } catch (error) {
-      setToast({ tone: "error", text: error instanceof Error ? error.message : "选择店铺失败。" });
-    }
-  };
-
-  const unbindTikTokBinding = async (grantId: string) => {
-    try {
-      await api.unbindTikTokBinding(grantId);
-      const refreshed = await loadWorkspace();
-      setToast(refreshed
-        ? { tone: "success", text: "绑定已解除，该账号的本地授权令牌已删除。" }
-        : { tone: "info", text: "绑定已解除，但页面数据刷新失败，请手动重试。" });
-    } catch (error) {
-      setToast({ tone: "error", text: error instanceof Error ? error.message : "解绑失败。" });
-    }
-  };
-
-  const openBindingWizard = () => {
-    setConnectionWizardStep("guide");
-    setConnectionWizardOpen(true);
-  };
-
   const openAddLlmWizard = () => {
     setLlmWizardEditing(undefined);
     setLlmWizardOpen(true);
@@ -577,9 +533,6 @@ export default function App() {
             tiktokConnection={tiktokConnection}
             onToggleAutomation={toggleAutomation}
             onOpenChat={openChat}
-            onSelectTikTokShop={selectTikTokShop}
-            onBindNewShop={openBindingWizard}
-            onUnbindBinding={unbindTikTokBinding}
             llmOverview={llmOverview}
             onLlmChanged={refreshLlm}
             onAddLlmProvider={openAddLlmWizard}
@@ -627,11 +580,9 @@ export default function App() {
             initialStep={connectionWizardStep}
             onClose={() => setConnectionWizardOpen(false)}
             tiktokConnection={tiktokConnection}
-            demoMode={dashboard.dataSource === "demo"}
             onRefresh={async () => {
               await loadWorkspace();
             }}
-            onSelectTikTokShop={selectTikTokShop}
           />
         </Suspense>
       )}
@@ -639,7 +590,6 @@ export default function App() {
         <Suspense fallback={<div />}>
           <LlmWizard
             editing={llmWizardEditing}
-            demoMode={dashboard.dataSource === "demo"}
             onClose={() => setLlmWizardOpen(false)}
             onSaved={refreshLlm}
           />
@@ -654,7 +604,6 @@ export default function App() {
             <ConnectorWizard
               skill={skill}
               status={skillStatus}
-              demoMode={dashboard.dataSource === "demo"}
               onClose={() => setConnectorWizardId(undefined)}
               onSaved={refreshSkills}
             />

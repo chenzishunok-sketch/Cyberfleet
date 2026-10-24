@@ -47,12 +47,7 @@ async function main() {
   console.log("");
   console.log("── 连接体检 ───────────────────────────────────────");
 
-  if (mode === "demo") {
-    line("bad", "运行模式", "DEMO_MODE=true（用的是演示数据）",
-      "把 .env 的 DEMO_MODE 改成 false，然后重启 npm run dev");
-  } else {
-    line("ok", "运行模式", `真实模式（${mode}）`);
-  }
+  line("ok", "运行模式", `真实模式（${mode}）`);
 
   line(llm.connected ? "ok" : "bad", "LLM 接口",
     llm.connected

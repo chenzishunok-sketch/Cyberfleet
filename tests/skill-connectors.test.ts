@@ -20,7 +20,6 @@ describe("business connector bindings", () => {
   });
 
   beforeEach(() => {
-    vi.stubEnv("DEMO_MODE", "false");
     vi.stubEnv("SKILLS_STORE", path.join(testDirectory, "skills.json"));
     vi.stubEnv("LLM_PROVIDERS_STORE", path.join(testDirectory, "llm-providers.json"));
     vi.stubEnv("LLM_API_KEY", "");

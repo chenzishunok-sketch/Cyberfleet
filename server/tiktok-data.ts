@@ -956,10 +956,6 @@ export async function getTikTokOperationalData(days = 7): Promise<TikTokOperatio
 }
 
 export async function getCurrentDashboard(): Promise<DashboardSnapshot> {
-  if (process.env.DEMO_MODE === "true") {
-    const { cloneDashboard } = await import("./data.ts");
-    return cloneDashboard();
-  }
   const status = await getTikTokConnectionStatus();
   if (!status.connected) return emptyDashboard(status.shopName, status.region);
   return (await getTikTokOperationalData(7)).dashboard;

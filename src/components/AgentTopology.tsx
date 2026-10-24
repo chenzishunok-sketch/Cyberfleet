@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Activity, Radio, Zap } from "lucide-react";
 import { DIGITAL_EMPLOYEES, getDigitalEmployee, type AgentContext } from "../../shared/digital-employees";
+import { API_BASE } from "../api";
 
 // ─── 事件类型 ──────────────────────────────────────────────────
 
@@ -95,7 +96,7 @@ export function AgentTopology({ embedded = false }: AgentTopologyProps) {
   const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    const es = new EventSource("/api/agents/stream");
+    const es = new EventSource(API_BASE + "/api/agents/stream");
     eventSourceRef.current = es;
 
     es.onmessage = (event) => {

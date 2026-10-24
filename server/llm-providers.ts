@@ -167,7 +167,7 @@ export function getLlmRuntimeConfig(): LlmRuntimeConfig {
 export function getLlmProvidersOverview(): LlmProvidersOverview {
   const store = readStoreSync();
   const config = getLlmRuntimeConfig();
-  const connected = Boolean(config.apiKey && config.model) && process.env.DEMO_MODE !== "true";
+  const connected = Boolean(config.apiKey && config.model);
   return {
     providers: store.providers.map(toSummary),
     activeId: store.activeId,

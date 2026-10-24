@@ -57,7 +57,7 @@ export interface ActivityItem {
 }
 
 export interface DashboardSnapshot {
-  dataSource: "tiktok" | "demo" | "unavailable";
+  dataSource: "tiktok" | "unavailable";
   store: StoreContext;
   metrics: Metric[];
   salesSeries: SalesPoint[];

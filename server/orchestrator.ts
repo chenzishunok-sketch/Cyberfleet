@@ -11,13 +11,12 @@ import type {
   ProductRow,
   RunStep,
 } from "../shared/contracts.ts";
-import { dashboard, cloneDashboard } from "./data.ts";
 import { handleDumateChat, isDumateConfigured, shouldRouteToDumate } from "./dumate-client.ts";
 import { decideWithLlm, hasLlmConfiguration, reactLoop, extractMemories, reflectOnResult, summarizeWebResearch, summarizeLiveShopData, type AgentDecision, type ToolExecutorFn } from "./llm.ts";
 import { loadMemory, formatMemoryForPrompt, addPreference, addInsight, recordOperation } from "./memory.ts";
 import { memoryLayer } from "./memory-layer.ts";
 import { recordDecisionOutcome } from "./learning-loop.ts";
-import { cleanAssistantText, cleanFollowUps, judgeResponseQuality, enrichPoorResponse } from "./response-presentation.ts";
+import { cleanAssistantText, cleanFollowUps } from "./response-presentation.ts";
 import { getTikTokOperationalData, type TikTokOperationalData } from "./tiktok-data.ts";
 import {
   approveTikTokProductWrite,
@@ -53,7 +52,6 @@ import { executeDelegation, registerDelegationHandler, getCollaborationOverview 
 import { scheduler } from "./scheduler.ts";
 import { isAgentContext, getDigitalEmployee, type AgentContext } from "../shared/digital-employees.ts";
 
-const pendingActions = new Map<string, ActionPlan>();
 const MIAOSHOU_WRITE_SCENES = new Set<MiaoshouSceneQuery>([
   "collect_item",
   "ai_match_category",
@@ -255,7 +253,8 @@ async function handleKolNaturalLanguage(request: ChatRequest): Promise<ChatRespo
 function createSteps(kind: "read" | "write" | "report" | "automation"): RunStep[] {
   const labels = {
     read: [
-      ["确认数据范围", "Luma Living US · UTC-7"],
+      // 不能写死演示店铺名：createSteps 也被真实采集审核卡使用（曾误显示 "Luma Living US"）
+      ["确认数据范围", "已授权店铺 · 当前站点"],
       ["读取店铺数据", "订单、商品与库存"],
       ["完成确定性汇总", "已校验数据口径"],
     ],
@@ -287,26 +286,9 @@ function createSteps(kind: "read" | "write" | "report" | "automation"): RunStep[
 function message(content: string, artifact?: MessageArtifact, steps?: RunStep[], followUps: string[] = [], originalQuestion = ""): ChatMessage {
   const suggestionPrompts = artifact?.kind === "suggestions" ? artifact.prompts : followUps;
   const normalizedFollowUps = cleanFollowUps(suggestionPrompts);
-  // 质量后校验：artifact 存在（说明有真实数据）或有原问题时触发
-  let finalContent = cleanAssistantText(content);
-  if (artifact || originalQuestion) {
-    const quality = judgeResponseQuality(finalContent, originalQuestion);
-    if (quality.quality === "poor") {
-      let recordCount = 0;
-      let sceneLabel = "";
-      let artifactHint = "";
-      if (artifact?.kind === "records") {
-        recordCount = artifact.rows?.length ?? 0;
-        sceneLabel = artifact.headline ?? "";
-        artifactHint = artifact.summary ?? "";
-      }
-      finalContent = enrichPoorResponse(finalContent, originalQuestion, {
-        recordCount,
-        sceneLabel,
-        artifactHint,
-      });
-    }
-  }
+  // 不改写模型输出：质量门按固定模板重写，等于拿占位文案冒充模型回答，
+  // 且会把「你能干嘛」这类闲聊的正常回答误判成「泛化能力清单」再替换成答非所问的兜底。
+  const finalContent = cleanAssistantText(content);
   return {
     id: randomUUID(),
     role: "assistant",
@@ -316,46 +298,6 @@ function message(content: string, artifact?: MessageArtifact, steps?: RunStep[],
     steps,
     ...(normalizedFollowUps.length ? { followUps: normalizedFollowUps } : {}),
   };
-}
-
-/**
- * 全局质量兜底门：所有出口返回前调用一次。
- * 即使前面的 message() 因为缺少 artifact/originalQuestion 没触发质量校验，
- * 这里也会用 userQuestion 重新判断，绝对不能把"我可以查询经营数据"这类无价值话术发给用户。
- */
-function finalQualityGate(msg: ChatMessage, userQuestion: string): ChatMessage {
-  // 真实模式下不改写模型输出：质量门会按模板重写内容，那等于用固定文案冒充模型回答。
-  // 模型答得不好就照实显示，便于发现真正的问题；演示模式仍保留这道门。
-  if (process.env.DEMO_MODE !== "true") return msg;
-  if (!userQuestion?.trim()) return msg;
-  const quality = judgeResponseQuality(msg.content, userQuestion);
-  if (quality.quality !== "poor") return msg;
-  let recordCount = 0;
-  let sceneLabel = "";
-  let artifactHint = "";
-  const artifact = msg.artifact;
-  if (artifact?.kind === "records") {
-    recordCount = artifact.rows?.length ?? 0;
-    sceneLabel = artifact.headline ?? "";
-    artifactHint = artifact.summary ?? "";
-  } else if (artifact?.kind === "products") {
-    recordCount = artifact.totalCount ?? artifact.products?.length ?? 0;
-    sceneLabel = artifact.headline ?? "";
-    artifactHint = artifact.summary ?? "";
-  } else if (artifact?.kind === "analysis") {
-    recordCount = artifact.metrics?.length ?? 0;
-    sceneLabel = artifact.headline ?? "";
-    artifactHint = artifact.source ?? "";
-  } else if (artifact?.kind === "report") {
-    sceneLabel = artifact.title ?? "";
-    artifactHint = artifact.executiveSummary ?? "";
-  }
-  const enriched = enrichPoorResponse(msg.content, userQuestion, {
-    recordCount,
-    sceneLabel,
-    artifactHint,
-  });
-  return { ...msg, content: enriched };
 }
 
 function extractQuantity(text: string, fallback = 80): number {
@@ -370,70 +312,6 @@ function extractPrice(text: string, fallback = 39.99): number {
 
 function extractSkus(text: string): string[] {
   return [...text.matchAll(/LL[-\s]?[A-Z0-9-]+/gi)].map((match) => match[0].replace(/\s/g, "").toUpperCase());
-}
-
-function salesArtifact(): MessageArtifact {
-  return {
-    kind: "analysis",
-    headline: "近 7 天 GMV 增长 12.7%，增长主要来自周末两天的订单放量。",
-    metrics: dashboard.metrics,
-    series: dashboard.salesSeries,
-    currency: dashboard.store.currency,
-    insights: [
-      { label: "主要增长", text: "7 月 26–27 日贡献了本周期 33.6% 的 GMV，订单量连续两天超过 200。", tone: "positive" },
-      { label: "商品贡献", text: "Aurora Sunset Lamp 为销售额第一，但按当前速度仅够销售约 4 天。", tone: "warning" },
-      { label: "需要关注", text: "退款率升至 3.1%，建议继续按退款原因拆解尺寸与物流问题。", tone: "neutral" },
-    ],
-    source: `订单、退款与商品数据 · 截至 ${dashboard.dataAsOf} (${dashboard.store.timezone})`,
-  };
-}
-
-function productsArtifact(focus = "low_stock"): MessageArtifact {
-  const products = focus === "all" ? dashboard.products : dashboard.products.filter((product) => product.status !== "healthy");
-  return {
-    kind: "products",
-    headline: products.length === 3 ? "发现 3 个需要优先处理的库存风险商品。" : `已找到 ${products.length} 个商品。`,
-    summary: "这些商品近 7 天合计贡献 $33,654 GMV；若销量保持不变，其中 2 个 SKU 预计 4 天内售罄。",
-    products,
-    source: `商品、订单与可售库存 · 截至 ${dashboard.dataAsOf} (${dashboard.store.timezone})`,
-  };
-}
-
-function createPlan(tool: ActionPlan["tool"], text: string, supplied?: Record<string, unknown>): ActionPlan {
-  const suppliedSkus = Array.isArray(supplied?.skus) ? supplied.skus.filter((value): value is string => typeof value === "string") : [];
-  const requestedSkus = suppliedSkus.length ? suppliedSkus : extractSkus(text);
-  const targets = requestedSkus.length ? requestedSkus : dashboard.products.filter((product) => product.status !== "healthy").map((product) => product.sku);
-  const diffs: FieldDiff[] = targets.slice(0, 50).map((sku, index) => {
-    const product = dashboard.products.find((item) => item.sku.toUpperCase() === sku.toUpperCase());
-    if (tool === "inventory.update") {
-      const quantity = typeof supplied?.quantity === "number" ? supplied.quantity : extractQuantity(text);
-      return { target: sku, field: "可售库存", before: String(product?.stock ?? [42, 86, 18][index] ?? 0), after: String(quantity) };
-    }
-    const price = typeof supplied?.price === "number" ? supplied.price : extractPrice(text);
-    return { target: sku, field: "销售价格", before: ["$43.99", "$38.99", "$34.90"][index] ?? "$29.99", after: `$${price.toFixed(2)}` };
-  });
-  const id = randomUUID();
-  const planBase = { id, tool, store: dashboard.store.id, diffs, createdAt: Date.now() };
-  const plan: ActionPlan = {
-    id,
-    tool,
-    title: tool === "inventory.update" ? "调整商品库存" : "调整商品价格",
-    summary: `将修改 ${diffs.length} 个 SKU。系统会在提交前再次校验当前值，并在完成后回读验证。`,
-    store: dashboard.store.name,
-    risk: diffs.length > 10 || tool === "price.update" ? "high" : "medium",
-    diffs,
-    expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-    status: "pending",
-    planHash: createHash("sha256").update(JSON.stringify(planBase)).digest("hex").slice(0, 12),
-  };
-  // 顺带清理已过期的演示计划，避免 Map 只增不减
-  for (const [key, existing] of pendingActions) {
-    if (existing.status !== "pending" && new Date(existing.expiresAt).getTime() < Date.now()) {
-      pendingActions.delete(key);
-    }
-  }
-  pendingActions.set(id, plan);
-  return plan;
 }
 
 async function createMiaoshouApproval(request: ChatRequest, scene: MiaoshouSceneQuery): Promise<ActionPlan> {
@@ -481,40 +359,6 @@ async function miaoshouStoreLabel(): Promise<string> {
     // OAuth 状态读不到时走兜底描述
   }
   return "已授权采集上架店铺";
-}
-
-function reportArtifact(days = 7, focus = "增长、退款和库存"): MessageArtifact {
-  return {
-    kind: "report",
-    title: "Luma Living US · 经营周报",
-    period: `过去 ${days} 天 · ${dashboard.store.timezone}`,
-    executiveSummary: "本周销售继续增长，但热销商品库存与退款率是下一周期的两个主要约束。建议优先补充 2 个高周转 SKU，并按退款原因复核排名前 20 的订单。",
-    sections: [
-      { title: "销售表现", body: "GMV 与订单同步增长，客单价也有小幅提升，说明增长并非单纯依赖折扣。", stat: "+12.7% GMV" },
-      { title: "商品结构", body: "前三个商品贡献超过一半增量，其中 Aurora Sunset Lamp 库存覆盖不足 7 天。", stat: "3 个风险 SKU" },
-      { title: "退款与履约", body: `报告重点为${focus}。退款率环比增加 0.6 个百分点，需要进一步拆分原因。`, stat: "3.1% 退款率" },
-    ],
-    source: `固定快照 · ${dashboard.dataAsOf} · 订单、商品、退款与库存`,
-  };
-}
-
-function automationArtifact(task = "每天 9 点检查低库存并生成补货清单", schedule = "每天 09:00"): MessageArtifact {
-  const automation = {
-    id: `auto-${randomUUID().slice(0, 8)}`,
-    name: task.includes("库存") ? "每日低库存检查" : "自定义运营任务",
-    schedule,
-    scope: dashboard.store.name,
-    nextRun: "明天 09:00",
-    lastResult: "尚未运行",
-    enabled: false,
-    kind: "report" as const,
-  };
-  dashboard.automations.unshift(automation);
-  return {
-    kind: "automation",
-    automation,
-    conditions: ["检查库存覆盖天数低于 7 天的 SKU", "生成补货清单，不自动修改库存", "完成后发送站内通知"],
-  };
 }
 
 function asksForBestSellers(text: string): boolean {
@@ -659,41 +503,6 @@ function inferFastReadDecision(text: string): AgentDecision | undefined {
   if (asksForDecision) return undefined;
   const asksForDirectRead = /(查看|查询|列出|统计|多少|概况|数据|当前|近\s*\d*\s*天|最近|过去|全部|所有|最低|最高|排行|名称|名字|币种|时区)/i.test(text);
   return asksForDirectRead ? decision : undefined;
-}
-
-function renderDecision(decision: AgentDecision, originalText: string): ChatMessage {
-  switch (decision.tool) {
-    case "get_shop_info":
-      return message(`当前演示店铺是 ${dashboard.store.name}，站点为 ${dashboard.store.region}。`);
-    case "get_sales_overview":
-    case "get_order_summary":
-    case "get_gmv_summary":
-    case "get_refund_summary":
-      return message("我已经汇总了近 7 天的经营数据。下面先给结论，再列出关键依据。", salesArtifact(), createSteps("read"));
-    case "explain_product_operations":
-      return message("当前应用尚未接入商品上架和下架接口，因此不能执行这两类操作。", {
-        kind: "suggestions",
-        prompts: ["查看全部商品库存", "查询最近 7 天订单", "生成经营报告"],
-      });
-    case "list_products":
-      return message("我按销售速度与可售库存做了交叉检查，优先级如下。", productsArtifact(decision.args.focus), createSteps("read"));
-    case "prepare_inventory_update": {
-      const plan = createPlan("inventory.update", originalText, decision.args);
-      return message("这是写操作。我已读取最新库存并生成变更预览，确认后才会提交。", { kind: "approval", plan }, createSteps("write"));
-    }
-    case "prepare_price_update": {
-      const plan = createPlan("price.update", originalText, decision.args);
-      return message("改价会直接影响在售商品。我先生成了不可变执行计划，需要你确认后再提交。", { kind: "approval", plan }, createSteps("write"));
-    }
-    case "generate_operations_report":
-      return message("经营报告已按当前数据口径生成，并保存为固定快照。", reportArtifact(decision.args.days, decision.args.focus), createSteps("report"));
-    case "create_readonly_automation":
-      return message("我已经把这条指令转换成自动任务草稿。它只生成分析结果，不会自动修改店铺。", automationArtifact(decision.args.task, decision.args.schedule), createSteps("automation"));
-    case "respond":
-      return message(decision.args.content, undefined, undefined, cleanFollowUps(decision.args.followUps ?? [], originalText), originalText);
-    default:
-      return message("业务任务工具需要在真实连接模式中使用。");
-  }
 }
 
 function extractDays(text: string): number {
@@ -1715,7 +1524,7 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
 
   // ── 快速路径：TikTok 秒杀任务 ──
   const flashSaleIntent = parseFlashSaleIntent(request.message);
-  if (process.env.DEMO_MODE !== "true" && flashSaleIntent) {
+  if (flashSaleIntent) {
     if (!flashSaleIntent.input) {
       return {
         message: message(`还缺少：${flashSaleIntent.missing.join("、")}。请补全后再发一次，我会先生成可核对的秒杀方案，不会立刻创建活动。`),
@@ -1734,7 +1543,7 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
 
   // ── 快速路径：1688 到 TikTok 的完整发布任务 ──
   const productWorkflowInput = extract1688WorkflowInput(request.message);
-  if (process.env.DEMO_MODE !== "true" && productWorkflowInput) {
+  if (productWorkflowInput) {
     try {
       const run = await startProductPublishWorkflow(productWorkflowInput);
       const responseMsg = message("已生成上架任务审核卡。审核通过后才会开始采集和认领；保存商品编辑与最终发布仍会分别再次审核。", { kind: "workflow", run });
@@ -1749,54 +1558,50 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
   }
 
   // ── 快速路径：采集场景查询和单步操作 ──
-  if (process.env.DEMO_MODE !== "true") {
-    const miaoshouQuery = inferMiaoshouSceneQuery(request.message);
-    if (miaoshouQuery) {
-      if (miaoshouQuery === "publish_to_tiktok") {
-        // 聊天里直接发布：复用 TikTok 采集箱里最近一件已认领、未发布的商品生成上架任务。
-        // 不直接提交发布——保存商品编辑与最终发布仍会在任务卡片里分别审核。
-        try {
-          const run = await startPublishFromCollectBox();
-          const responseMsg = message(
-            `已基于 TikTok 采集箱商品 ${run.platformDetailId} 生成上架任务审核卡。审核通过后会自动补全资料并进入保存/发布确认；不会再重复采集或认领。`,
-            { kind: "workflow", run },
-          );
-          void extractAndSaveMemory(request, responseMsg);
-          return { message: responseMsg, runId: randomUUID() };
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : "采集箱查询失败。";
-          return {
-            message: message(`暂时无法在聊天里创建发布任务：${reason} 也可以粘贴 1688 链接，我会走完整的采集 → 认领 → 发布流程。`),
-            runId: randomUUID(),
-          };
-        }
-      }
-      if (MIAOSHOU_WRITE_SCENES.has(miaoshouQuery)) {
-        const plan = await createMiaoshouApproval(request, miaoshouQuery);
-        return {
-          message: message("这项操作会修改采集商品数据。我已生成审核卡片，审核通过后才会调用接口。", { kind: "approval", plan }, createSteps("write")),
-          runId: randomUUID(),
-        };
-      }
+  const miaoshouQuery = inferMiaoshouSceneQuery(request.message);
+  if (miaoshouQuery) {
+    if (miaoshouQuery === "publish_to_tiktok") {
+      // 聊天里直接发布：复用 TikTok 采集箱里最近一件已认领、未发布的商品生成上架任务。
+      // 不直接提交发布——保存商品编辑与最终发布仍会在任务卡片里分别审核。
       try {
-        const result = await runMiaoshouSceneQuery(miaoshouQuery, request.message, request.history);
-        const followUps = miaoshouSceneFollowUps(miaoshouQuery);
+        const run = await startPublishFromCollectBox();
         const responseMsg = message(
-          result.content,
-          result.artifact,
-          miaoshouQuerySteps(miaoshouQuery),
-          followUps,
-          // 带上原问题：万一内容被判空泛，兜底文案里能引用用户真正问的那句话
-          request.message,
+          `已基于 TikTok 采集箱商品 ${run.platformDetailId} 生成上架任务审核卡。审核通过后会自动补全资料并进入保存/发布确认；不会再重复采集或认领。`,
+          { kind: "workflow", run },
         );
         void extractAndSaveMemory(request, responseMsg);
         return { message: responseMsg, runId: randomUUID() };
       } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : "采集上架 API 调用失败";
-        const responseMsg = message(`采集上架接口调用遇到问题：${errorMsg}`, undefined, undefined, ["查看公共采集箱", "查看全部商品和 SKU"]);
-        void extractAndSaveMemory(request, responseMsg);
-        return { message: responseMsg, runId: randomUUID() };
+        const reason = error instanceof Error ? error.message : "采集箱查询失败。";
+        return {
+          message: message(`暂时无法在聊天里创建发布任务：${reason} 也可以粘贴 1688 链接，我会走完整的采集 → 认领 → 发布流程。`),
+          runId: randomUUID(),
+        };
       }
+    }
+    if (MIAOSHOU_WRITE_SCENES.has(miaoshouQuery)) {
+      const plan = await createMiaoshouApproval(request, miaoshouQuery);
+      return {
+        message: message("这项操作会修改采集商品数据。我已生成审核卡片，审核通过后才会调用接口。", { kind: "approval", plan }, createSteps("write")),
+        runId: randomUUID(),
+      };
+    }
+    try {
+      const result = await runMiaoshouSceneQuery(miaoshouQuery, request.message, request.history);
+      const followUps = miaoshouSceneFollowUps(miaoshouQuery);
+      const responseMsg = message(
+        result.content,
+        result.artifact,
+        miaoshouQuerySteps(miaoshouQuery),
+        followUps,
+      );
+      void extractAndSaveMemory(request, responseMsg);
+      return { message: responseMsg, runId: randomUUID() };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "采集上架 API 调用失败";
+      const responseMsg = message(`采集上架接口调用遇到问题：${errorMsg}`, undefined, undefined, ["查看公共采集箱", "查看全部商品和 SKU"]);
+      void extractAndSaveMemory(request, responseMsg);
+      return { message: responseMsg, runId: randomUUID() };
     }
   }
 
@@ -1813,7 +1618,7 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
     || /(食品|零食|饮料|生鲜|水果|蔬菜|保健品|维生素|蛋白粉|减肥|代餐|咖啡|茶|宠物食品)/i.test(request.message)
     || /(母婴|婴儿|宝宝|孕妇|奶粉|纸尿裤|奶瓶|玩具|积木|娃娃)/i.test(request.message)
     || /(运动|健身|户外|跑步|瑜伽|自行车|登山|露营|钓鱼|球|球拍)/i.test(request.message);
-  if (process.env.DEMO_MODE !== "true" && !isFastMossRequest && !hasCategoryIntent) {
+  if (!isFastMossRequest && !hasCategoryIntent) {
     const sceneQuery = inferTikTokSceneQuery(request.message);
     if (sceneQuery) {
       const requestedDays = extractDays(request.message);
@@ -1882,7 +1687,7 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
   // ── ReAct 多步推理路径（真实模式 + LLM 可用时启用） ──
   let responseMessage: ChatMessage;
 
-  if (process.env.DEMO_MODE !== "true" && hasLlmConfiguration()) {
+  if (hasLlmConfiguration()) {
     try {
       const rawToolExecutor = createLiveToolExecutor(request);
       // 用闭环学习追踪包装工具执行器：记录决策→结果→反思链路
@@ -1971,10 +1776,6 @@ async function runChat(request: ChatRequest, emit?: ChatStreamEmitter): Promise<
     }
   }
 
-  // ── 全局质量兜底门：无论走哪条路径，最后都过一遍 ──────────────
-  // 绝对禁止把"我可以查询经营数据"这类无价值话术发给用户
-  responseMessage = finalQualityGate(responseMessage, request.message);
-
   // 异步提取并保存记忆（不阻塞响应）
   void extractAndSaveMemory(request, responseMessage);
 
@@ -2027,9 +1828,7 @@ async function fallbackDecision(request: ChatRequest, providedContext?: string):
     decision = inferDecision(request.message);
   }
 
-  const msg = process.env.DEMO_MODE === "true"
-    ? renderDecision(decision, request.message)
-    : await renderLiveDecision(decision, request.message);
+  const msg = await renderLiveDecision(decision, request.message);
   if (!msg.followUps?.length && msg.artifact?.kind !== "approval" && msg.artifact?.kind !== "automation") {
     const followUps = decisionFollowUps(decision, request.message);
     if (followUps.length) msg.followUps = followUps;
@@ -2073,149 +1872,104 @@ async function extractAndSaveMemory(request: ChatRequest, response: ChatMessage)
 }
 
 export async function approveAction(actionId: string): Promise<ActionResponse> {
-  if (process.env.DEMO_MODE !== "true") {
-    const miaoshouAction = getMiaoshouAction(actionId);
-    if (miaoshouAction) {
-      const { plan, scene, query, history } = miaoshouAction;
-      if (miaoshouAction.status === "verification_pending") {
-        return {
-          actionStatus: "verification_pending",
-          message: message("采集写入请求的最终结果仍需核对。系统不会重复提交，请先查询采集箱、发布记录或目标店铺的最新状态。"),
-        };
-      }
-      if (plan.status !== "pending") throw new Error("该审核计划已经处理，不能重复提交。");
-      if (new Date(plan.expiresAt).getTime() < Date.now()) {
-        saveMiaoshouAction(miaoshouAction, "expired");
-        throw new Error("审核计划已过期，请重新发送原指令获取最新计划。");
-      }
-      saveMiaoshouAction(miaoshouAction, "executing");
+  const miaoshouAction = getMiaoshouAction(actionId);
+  if (miaoshouAction) {
+    const { plan, scene, query, history } = miaoshouAction;
+    if (miaoshouAction.status === "verification_pending") {
+      return {
+        actionStatus: "verification_pending",
+        message: message("采集写入请求的最终结果仍需核对。系统不会重复提交，请先查询采集箱、发布记录或目标店铺的最新状态。"),
+      };
+    }
+    if (plan.status !== "pending") throw new Error("该审核计划已经处理，不能重复提交。");
+    if (new Date(plan.expiresAt).getTime() < Date.now()) {
+      saveMiaoshouAction(miaoshouAction, "expired");
+      throw new Error("审核计划已过期，请重新发送原指令获取最新计划。");
+    }
+    saveMiaoshouAction(miaoshouAction, "executing");
+    try {
+      const result = await runMiaoshouSceneQuery(scene, query, history);
+      saveMiaoshouAction(miaoshouAction, "approved");
+      const requestId = `miaoshou_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
       try {
-        const result = await runMiaoshouSceneQuery(scene, query, history);
-        saveMiaoshouAction(miaoshouAction, "approved");
-        const requestId = `miaoshou_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-        try {
-          recordOperation(`${plan.title}：${plan.diffs.map((diff) => `${diff.target} ${diff.after}`).join("；")}`);
-        } catch {
-          // 记忆记录失败不影响已经完成的采集操作。
-        }
-        return {
-          message: message(result.content, {
-            kind: "receipt",
-            actionId,
-            title: `${plan.title}已完成`,
-            summary: "采集上架接口已经完成本次审核范围内的操作。该审核计划已锁定，不能重复提交。",
-            requestId,
-            completedAt: new Date().toISOString(),
-            diffs: plan.diffs,
-          }, createSteps("write"), miaoshouSceneFollowUps(scene)),
-        };
-      } catch (error) {
-        saveMiaoshouAction(miaoshouAction, "verification_pending");
-        return {
-          actionStatus: "verification_pending",
-          message: message(`采集写入请求可能已经生效，但暂时无法确认最终结果：${error instanceof Error ? error.message : "未知错误"}。系统已停止重复提交，请先查询最新状态。`),
-        };
+        recordOperation(`${plan.title}：${plan.diffs.map((diff) => `${diff.target} ${diff.after}`).join("；")}`);
+      } catch {
+        // 记忆记录失败不影响已经完成的采集操作。
       }
-    }
-    let result;
-    try {
-      result = await approveTikTokProductWrite(actionId);
+      return {
+        message: message(result.content, {
+          kind: "receipt",
+          actionId,
+          title: `${plan.title}已完成`,
+          summary: "采集上架接口已经完成本次审核范围内的操作。该审核计划已锁定，不能重复提交。",
+          requestId,
+          completedAt: new Date().toISOString(),
+          diffs: plan.diffs,
+        }, createSteps("write"), miaoshouSceneFollowUps(scene)),
+      };
     } catch (error) {
-      if (error instanceof ActionVerificationPendingError) {
-        return { actionStatus: "verification_pending", message: message(error.message) };
-      }
-      throw error;
-    }
-    if (!result) throw new Error("找不到该执行计划，可能已经失效。");
-
-    // 反思：评估操作结果
-    let reflectionNote = "";
-    try {
-      const beforeDesc = result.plan.diffs.map((d) => `${d.target} ${d.field}: ${d.before}`).join("；");
-      const afterDesc = result.plan.diffs.map((d) => `${d.target} ${d.field}: ${d.after}`).join("；");
-      const reflection = await reflectOnResult(result.plan.title, beforeDesc, afterDesc);
-      if (reflection.risks.length || reflection.suggestion) {
-        reflectionNote = reflection.suggestion
-          ? ` Agent 评估：${reflection.risks.length ? `存在风险（${reflection.risks.join("、")}）。` : ""}${reflection.suggestion}`
-          : "";
-      }
-    } catch {
-      // 反思失败不影响主流程
-    }
-
-    // 记录操作到长期记忆
-    try {
-      recordOperation(`${result.plan.title}：${result.plan.diffs.map((d) => `${d.target} ${d.field} ${d.before}→${d.after}`).join("；")}`);
-    } catch { /* ignore */ }
-
-    const receiptContent = `操作已提交 TikTok Shop，并已回读验证最新值。${reflectionNote}`;
-    return {
-      message: message(receiptContent, {
-        kind: "receipt",
-        actionId,
-        title: `${result.plan.title}已完成`,
-        summary: `成功完成 ${result.plan.diffs.length} 项明确变更。审批计划已锁定，不能重复提交。`,
-        requestId: result.requestId,
-        completedAt: result.completedAt,
-        diffs: result.plan.diffs,
-      }),
-      dashboard: result.dashboard,
-    };
-  }
-  const plan = pendingActions.get(actionId);
-  if (!plan) throw new Error("找不到该执行计划，可能已经失效。");
-  if (plan.status !== "pending") throw new Error("该执行计划已处理，不能重复提交。");
-  if (new Date(plan.expiresAt).getTime() < Date.now()) {
-    pendingActions.delete(actionId);
-    throw new Error("执行计划已过期，请重新生成以获取最新数据。");
-  }
-
-  plan.status = "executing";
-  if (plan.tool === "inventory.update") {
-    for (const diff of plan.diffs) {
-      const product = dashboard.products.find((item) => item.sku === diff.target);
-      if (product) product.stock = Number(diff.after);
+      saveMiaoshouAction(miaoshouAction, "verification_pending");
+      return {
+        actionStatus: "verification_pending",
+        message: message(`采集写入请求可能已经生效，但暂时无法确认最终结果：${error instanceof Error ? error.message : "未知错误"}。系统已停止重复提交，请先查询最新状态。`),
+      };
     }
   }
-  plan.status = "approved";
-  const requestId = `req_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-  dashboard.activity.unshift({
-    id: randomUUID(),
-    title: plan.title,
-    meta: `${nowLabel()} · 你 · ${requestId}`,
-    status: "success",
-  });
+  let result;
+  try {
+    result = await approveTikTokProductWrite(actionId);
+  } catch (error) {
+    if (error instanceof ActionVerificationPendingError) {
+      return { actionStatus: "verification_pending", message: message(error.message) };
+    }
+    throw error;
+  }
+  if (!result) throw new Error("找不到该执行计划，可能已经失效。");
 
+  // 反思：评估操作结果
+  let reflectionNote = "";
+  try {
+    const beforeDesc = result.plan.diffs.map((d) => `${d.target} ${d.field}: ${d.before}`).join("；");
+    const afterDesc = result.plan.diffs.map((d) => `${d.target} ${d.field}: ${d.after}`).join("；");
+    const reflection = await reflectOnResult(result.plan.title, beforeDesc, afterDesc);
+    if (reflection.risks.length || reflection.suggestion) {
+      reflectionNote = reflection.suggestion
+        ? ` Agent 评估：${reflection.risks.length ? `存在风险（${reflection.risks.join("、")}）。` : ""}${reflection.suggestion}`
+        : "";
+    }
+  } catch {
+    // 反思失败不影响主流程
+  }
+
+  // 记录操作到长期记忆
+  try {
+    recordOperation(`${result.plan.title}：${result.plan.diffs.map((d) => `${d.target} ${d.field} ${d.before}→${d.after}`).join("；")}`);
+  } catch { /* ignore */ }
+
+  const receiptContent = `操作已提交 TikTok Shop，并已回读验证最新值。${reflectionNote}`;
   return {
-    message: message("操作已完成，并已回读验证店铺中的最新值。", {
+    message: message(receiptContent, {
       kind: "receipt",
       actionId,
-      title: `${plan.title}已完成`,
-      summary: `成功更新 ${plan.diffs.length}/${plan.diffs.length} 个 SKU。审批记录、变更差异和请求编号已写入执行日志。`,
-      requestId,
-      completedAt: new Date().toISOString(),
-      diffs: plan.diffs,
+      title: `${result.plan.title}已完成`,
+      summary: `成功完成 ${result.plan.diffs.length} 项明确变更。审批计划已锁定，不能重复提交。`,
+      requestId: result.requestId,
+      completedAt: result.completedAt,
+      diffs: result.plan.diffs,
     }),
-    dashboard: cloneDashboard(),
+    dashboard: result.dashboard,
   };
 }
 
 export function rejectAction(actionId: string): ActionPlan {
-  if (process.env.DEMO_MODE !== "true") {
-    const miaoshouAction = getMiaoshouAction(actionId);
-    if (miaoshouAction) {
-      if (miaoshouAction.plan.status !== "pending") throw new Error("该审核计划已经处理。");
-      saveMiaoshouAction(miaoshouAction, "rejected");
-      return miaoshouAction.plan;
-    }
-    const plan = rejectTikTokProductWrite(actionId);
-    if (!plan) throw new Error("找不到该执行计划。");
-    return plan;
+  const miaoshouAction = getMiaoshouAction(actionId);
+  if (miaoshouAction) {
+    if (miaoshouAction.plan.status !== "pending") throw new Error("该审核计划已经处理。");
+    saveMiaoshouAction(miaoshouAction, "rejected");
+    return miaoshouAction.plan;
   }
-  const plan = pendingActions.get(actionId);
+  const plan = rejectTikTokProductWrite(actionId);
   if (!plan) throw new Error("找不到该执行计划。");
-  if (plan.status !== "pending") throw new Error("该执行计划已处理。");
-  plan.status = "rejected";
   return plan;
 }
 

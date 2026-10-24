@@ -17,7 +17,7 @@ import { getRecentInsights } from "./proactive-agent.ts";
 import { memoryLayer } from "./memory-layer.ts";
 import { taskQueue } from "./task-queue.ts";
 import { learningLoop } from "./learning-loop.ts";
-import { completeTikTokAuthorization, createTikTokAuthorizationUrl, getTikTokConnectionStatus, listBindings, removeBinding, selectAuthorizedShop } from "./tiktok-auth.ts";
+import { completeTikTokAuthorization, createTikTokAuthorizationUrl, getTikTokConnectionStatus } from "./tiktok-auth.ts";
 import {
   activateProvider,
   addProvider,
@@ -238,23 +238,20 @@ export function createApp() {
       return;
     }
     const tiktok = await getTikTokConnectionStatus();
-    const demoMode = process.env.DEMO_MODE === "true";
     const llmOverview = getLlmProvidersOverview();
     const miaoshou = hasMiaoshouConfiguration();
     const tmapi = hasTmapiConfiguration();
-    const feishu = demoMode
-      ? { configured: hasFeishuConfiguration(), connected: false }
-      : await getFeishuConnectionStatus();
+    const feishu = await getFeishuConnectionStatus();
     const feishuBridge = getFeishuBridgeStatus();
     const connections = {
       llm: llmOverview.connected,
-      tiktok: !demoMode && tiktok.connected,
-      miaoshou: !demoMode && miaoshou,
-      tmapi: !demoMode && tmapi,
-      feishu: !demoMode && feishu.connected,
+      tiktok: tiktok.connected,
+      miaoshou,
+      tmapi,
+      feishu: feishu.connected,
       kolBridge: kolBridge.isConnected(),
     };
-    const mode = demoMode ? "demo" : connections.llm && connections.tiktok ? "connected" : "setup";
+    const mode = connections.llm && connections.tiktok ? "connected" : "setup";
     const payload = {
       ok: true,
       mode,
@@ -268,8 +265,8 @@ export function createApp() {
         ...(llmOverview.name ? { name: llmOverview.name } : {}),
         ...(llmOverview.model ? { model: llmOverview.model } : {}),
       },
-      miaoshou: { connected: !demoMode && miaoshou },
-      tmapi: { connected: !demoMode && tmapi },
+      miaoshou: { connected: miaoshou },
+      tmapi: { connected: tmapi },
       feishu: { ...feishu, longConnection: feishuBridge.connected, bridgeState: feishuBridge.state },
     };
     healthCache = { at: now, payload };
@@ -735,44 +732,6 @@ export function createApp() {
     }
   });
 
-  app.post("/api/tiktok/shop", async (request, response) => {
-    const parsed = selectShopSchema.safeParse(request.body);
-    if (!parsed.success) {
-      response.status(400).json({ error: "请选择一个已授权店铺。" });
-      return;
-    }
-    try {
-      const shop = await selectAuthorizedShop(parsed.data.shopId, parsed.data.grantId);
-      response.json({ shop, tiktok: await getTikTokConnectionStatus() });
-    } catch (error) {
-      response.status(400).json({ error: error instanceof Error ? error.message : "无法选择店铺。" });
-    }
-  });
-
-  // ─── 多店铺绑定管理：列表 / 解绑 ─────────────────────────────
-
-  app.get("/api/tiktok/bindings", async (_request, response) => {
-    try {
-      response.json({ bindings: await listBindings(), tiktok: await getTikTokConnectionStatus() });
-    } catch (error) {
-      response.status(500).json({ error: error instanceof Error ? error.message : "读取店铺绑定失败。" });
-    }
-  });
-
-  app.delete("/api/tiktok/bindings/:grantId", async (request, response) => {
-    const grantId = typeof request.params.grantId === "string" ? request.params.grantId : "";
-    if (!grantId) {
-      response.status(400).json({ error: "缺少绑定编号。" });
-      return;
-    }
-    try {
-      await removeBinding(grantId);
-      healthCache = undefined;
-      response.json({ ok: true, tiktok: await getTikTokConnectionStatus() });
-    } catch (error) {
-      response.status(400).json({ error: error instanceof Error ? error.message : "解绑失败。" });
-    }
-  });
 
   app.get("/api/dashboard", async (_request, response) => {
     try {

@@ -545,37 +545,6 @@ export async function completeTikTokAuthorization(input: { code?: string; state?
   return { shops, selectedShop };
 }
 
-export async function selectAuthorizedShop(shopId: string, grantId?: string): Promise<AuthorizedShop> {
-  const store = await readBindings();
-  let target: { grant: TikTokGrant; shop: AuthorizedShop } | undefined;
-  if (grantId) {
-    const grant = store.grants.find((item) => item.grantId === grantId);
-    const shop = grant?.shops.find((item) => item.id === shopId);
-    if (grant && shop) target = { grant, shop };
-  }
-  if (!target) {
-    for (const grant of store.grants) {
-      const shop = grant.shops.find((item) => item.id === shopId);
-      if (shop) {
-        target = { grant, shop };
-        break;
-      }
-    }
-  }
-  if (!target) throw new Error("没有找到这个已授权店铺。");
-  await saveBindingsFile({ ...store, selected: { grantId: target.grant.grantId, shopId: target.shop.id } });
-  return target.shop;
-}
-
-export async function removeBinding(grantId: string): Promise<void> {
-  const store = await readBindings();
-  const grants = store.grants.filter((item) => item.grantId !== grantId);
-  if (grants.length === store.grants.length) throw new Error("没有找到这个店铺绑定。");
-  const selected = store.selected?.grantId === grantId ? null : store.selected;
-  await saveBindingsFile({ version: 2, selected, grants });
-  refreshPromises.delete(grantId);
-}
-
 export function bindingSummaries(store: TikTokBindingsStore): TikTokBindingSummary[] {
   const now = Math.floor(Date.now() / 1000);
   return store.grants.map((grant) => {
@@ -595,19 +564,15 @@ export function bindingSummaries(store: TikTokBindingsStore): TikTokBindingSumma
   });
 }
 
-export async function listBindings(): Promise<TikTokBindingSummary[]> {
-  const store = await readBindings();
-  return bindingSummaries(store);
-}
-
 export async function getAuthorizedTikTokClient(): Promise<TikTokShopClient | null> {
   const store = await readBindings();
   if (!store.grants.length) return TikTokShopClient.fromEnv();
   const active = store.selected ? store.grants.find((item) => item.grantId === store.selected?.grantId) : undefined;
   if (!active) throw new Error("请先在设置中选择要操作的 TikTok Shop 店铺。");
   const fresh = await ensureFreshGrant(active);
-  const shop = fresh.shops.find((item) => item.id === store.selected?.shopId);
-  if (!shop) throw new Error("已授权多个 TikTok Shop 店铺，请先选择要操作的店铺。");
+  // 单店铺语义：以已选店铺为准，取不到时自动用授权返回的第一个店铺，不再要求人工切换
+  const shop = fresh.shops.find((item) => item.id === store.selected?.shopId) ?? fresh.shops[0];
+  if (!shop) throw new Error("这次授权没有返回可用店铺，请重新授权。");
   const { appKey, appSecret } = requireAppCredentials();
   return new TikTokShopClient({
     baseUrl: process.env.TIKTOK_SHOP_BASE_URL ?? DEFAULT_TIKTOK_BASE_URL,

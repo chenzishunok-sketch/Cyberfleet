@@ -266,7 +266,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({ messages, sending, co
       {showWorkbenchHome ? (
         <div className="workbench-home">
           <section className="workbench-welcome" aria-labelledby="workbench-greeting">
-            <img className="workbench-team" src="/assets/workbench/digital-employee-team.png" alt="跨境电商多Agent协同系统 数字员工团队" />
+            <img className="workbench-team" src={import.meta.env.BASE_URL + "assets/workbench/digital-employee-team.png"} alt="跨境电商多Agent协同系统 数字员工团队" />
             <h1 id="workbench-greeting">{greeting}，今天想先处理什么？</h1>
             <p>告诉我你的经营目标，我会安排合适的数字员工一起完成。</p>
             {composerShell}

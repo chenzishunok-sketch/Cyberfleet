@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Activity, Check, Clock3, LoaderCircle, UsersRound } from "lucide-react";
 import type { OfficeSnapshot } from "../../shared/contracts";
 import type { AgentState } from "@/types/agent";
-import { api } from "../api";
+import { api, API_BASE } from "../api";
 import type { ViewId } from "./Sidebar";
 import { OfficeScene } from "@/scene/OfficeScene";
 
@@ -87,7 +87,7 @@ export function OfficePage({ onSelectAgent }: { onSelectAgent?: (view: ViewId) =
         console.error("办公室状态加载失败", error);
       });
 
-    const source = new EventSource("/api/agents/stream");
+    const source = new EventSource(API_BASE + "/api/agents/stream");
     source.onmessage = (message) => {
       try {
         const event = JSON.parse(message.data as string) as {
